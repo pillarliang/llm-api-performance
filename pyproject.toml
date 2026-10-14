@@ -1,0 +1,9 @@
+[project]
+name = "llm-performance"
+version = "0.1.0"
+description = "Reproducible streaming LLM API benchmarks and reports"
+requires-python = ">=3.12"
+dependencies = ["openai>=2,<3", "PyYAML>=6,<7", "tiktoken>=0.7,<1", "fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
+
+[dependency-groups]
+dev = ["httpx>=0.27,<1"]

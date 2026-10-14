@@ -1,0 +1,16 @@
+[Unit]
+Description=LLM API Performance Workbench
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pillar/llm-performance
+EnvironmentFile=/home/pillar/llm-performance/.env
+ExecStart=/home/pillar/llm-performance/.venv/bin/uvicorn server:app --host 0.0.0.0 --port 8001 --workers 1
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

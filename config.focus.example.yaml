@@ -1,0 +1,244 @@
+# 重点评测 GLM-5.3 / GLM-5.2 / Qwen3.8；GLM：low / high / max；Qwen3.8-Max：low / medium / xhigh。
+cache_state: uncontrolled
+concurrencies:
+- 10
+input_tokens:
+- 512
+- 1024
+models:
+- base_url: https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+  api_key_env: DASHSCOPE_API_KEY
+  base_url_env: DASHSCOPE_BASE_URL
+  include_usage: true
+  id: glm-5.3
+  model: glm-5.3
+  enabled: true
+  profiles:
+  - name: low
+    label: low · 低
+    description: 轻量推理，适合低延迟、相对简单的任务。
+    thinking_enabled: true
+    parameters:
+      thinking:
+        type: enabled
+      reasoning_effort: low
+  - name: high
+    label: high · 高
+    description: 增强推理，在精度与 Token 消耗之间取得平衡。
+    thinking_enabled: true
+    parameters:
+      thinking:
+        type: enabled
+      reasoning_effort: high
+  - name: max
+    label: max · 最大 / 默认
+    description: 深度推理，适合复杂软件工程、长程 Agent 和高难度漏洞挖掘。
+    thinking_enabled: true
+    parameters:
+      thinking:
+        type: enabled
+      reasoning_effort: max
+- api_key_env: DASHSCOPE_API_KEY
+  base_url: https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+  base_url_env: DASHSCOPE_BASE_URL
+  enabled: true
+  id: glm-5.2
+  include_usage: true
+  model: glm-5.2
+  profiles:
+  - name: low
+    label: low · 低
+    description: 轻量推理，适合低延迟、相对简单的任务。
+    thinking_enabled: true
+    parameters:
+      thinking:
+        type: enabled
+      reasoning_effort: low
+  - name: high
+    label: high · 高
+    description: 增强推理，在精度与 Token 消耗之间取得平衡。
+    thinking_enabled: true
+    parameters:
+      thinking:
+        type: enabled
+      reasoning_effort: high
+  - name: max
+    label: max · 最大 / 默认
+    description: 深度推理，适合复杂软件工程、长程 Agent 和高难度漏洞挖掘。
+    thinking_enabled: true
+    parameters:
+      thinking:
+        type: enabled
+      reasoning_effort: max
+- api_key_env: DASHSCOPE_API_KEY
+  base_url: https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+  base_url_env: DASHSCOPE_BASE_URL
+  enabled: true
+  id: qwen3.8-max
+  include_usage: true
+  model: qwen3.8-max
+  profiles:
+  - name: low
+    label: low · 低
+    description: 以速度与成本为优先的高效推理。
+    thinking_enabled: true
+    parameters:
+      enable_thinking: true
+      reasoning_effort: low
+  - name: medium
+    label: medium · 中
+    description: 在准确性与速度之间取得平衡。
+    thinking_enabled: true
+    parameters:
+      enable_thinking: true
+      reasoning_effort: medium
+  - name: xhigh
+    label: xhigh · 超高 / 默认
+    description: 适用于需要深入分析的复杂任务。
+    thinking_enabled: true
+    parameters:
+      enable_thinking: true
+      reasoning_effort: xhigh
+- api_key_env: DASHSCOPE_API_KEY
+  base_url: https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+  base_url_env: DASHSCOPE_BASE_URL
+  enabled: false
+  id: qwen3.8-flash
+  include_usage: true
+  model: qwen3.8-flash
+  profiles:
+  - name: 'off'
+    parameters:
+      enable_thinking: false
+    thinking_enabled: false
+  - name: low
+    parameters:
+      enable_thinking: true
+      reasoning_effort: low
+    thinking_enabled: true
+  - name: medium
+    parameters:
+      enable_thinking: true
+      reasoning_effort: medium
+    thinking_enabled: true
+  - name: xhigh
+    parameters:
+      enable_thinking: true
+      reasoning_effort: xhigh
+    thinking_enabled: true
+- api_key_env: DASHSCOPE_API_KEY
+  base_url: https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+  base_url_env: DASHSCOPE_BASE_URL
+  enabled: false
+  id: deepseek-v4-pro-0813
+  include_usage: true
+  model: deepseek-v4-pro-0813
+  profiles:
+  - name: 'off'
+    parameters:
+      thinking:
+        type: disabled
+    thinking_enabled: false
+  - name: low
+    parameters:
+      reasoning_effort: low
+      thinking:
+        type: enabled
+    thinking_enabled: true
+  - name: high
+    parameters:
+      reasoning_effort: high
+      thinking:
+        type: enabled
+    thinking_enabled: true
+  - name: max
+    parameters:
+      reasoning_effort: max
+      thinking:
+        type: enabled
+    thinking_enabled: true
+- api_key_env: DASHSCOPE_API_KEY
+  base_url: https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+  base_url_env: DASHSCOPE_BASE_URL
+  enabled: false
+  id: deepseek-v4-flash-0731
+  include_usage: true
+  model: deepseek-v4-flash-0731
+  profiles:
+  - name: 'off'
+    parameters:
+      thinking:
+        type: disabled
+    thinking_enabled: false
+  - name: low
+    parameters:
+      reasoning_effort: low
+      thinking:
+        type: enabled
+    thinking_enabled: true
+  - name: high
+    parameters:
+      reasoning_effort: high
+      thinking:
+        type: enabled
+    thinking_enabled: true
+  - name: max
+    parameters:
+      reasoning_effort: max
+      thinking:
+        type: enabled
+    thinking_enabled: true
+- api_key_env: DASHSCOPE_API_KEY
+  base_url: https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+  base_url_env: DASHSCOPE_BASE_URL
+  enabled: false
+  id: kimi-k3
+  include_usage: true
+  model: kimi-k3
+  profiles:
+  - name: low
+    parameters:
+      reasoning_effort: low
+      thinking:
+        type: enabled
+    thinking_enabled: true
+  - name: high
+    parameters:
+      reasoning_effort: high
+      thinking:
+        type: enabled
+    thinking_enabled: true
+  - name: max
+    parameters:
+      reasoning_effort: max
+      thinking:
+        type: enabled
+    thinking_enabled: true
+- api_key_env: DASHSCOPE_API_KEY
+  base_url: https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+  base_url_env: DASHSCOPE_BASE_URL
+  enabled: false
+  id: MiniMax/MiniMax-M3
+  include_usage: true
+  model: MiniMax/MiniMax-M3
+  profiles:
+  - name: 'off'
+    parameters:
+      thinking:
+        type: disabled
+    thinking_enabled: false
+  - name: adaptive
+    parameters:
+      thinking:
+        type: adaptive
+    thinking_enabled: true
+name: llm-performance-smoke
+parameters: {}
+repetitions: 3
+tasks:
+- corpus_file: prompts/corpus.txt
+  id: summary
+  template_file: prompts/summary.txt
+timeout_seconds: 300
+version: v1
+warmup: 0

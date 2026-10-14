@@ -1,0 +1,14 @@
+.venv/
+.runtime/
+.bootstrap/
+__pycache__/
+*.pyc
+results/
+config.local.*
+.env
+*.log
+.server.pid
+.token-cache/
+state/
+deploy/.admin-token
+.qa/

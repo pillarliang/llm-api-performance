@@ -1,0 +1,30 @@
+const {chromium} = require('playwright');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+
+(async()=>{
+  const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+  const page=await browser.newPage({viewport:{width:1600,height:1000},acceptDownloads:true});
+  const errors=[];page.on('pageerror',error=>errors.push(error.message));
+  const origin=process.env.PREVIEW_ORIGIN||'http://127.0.0.1:8001';
+  await page.goto(origin);
+  await page.locator('#workspace').waitFor({state:'visible'});
+  await page.locator('[data-tab="history"]').click();
+  await page.locator('#history-rows tr').filter({hasText:'deployment-smoke'}).first().getByRole('button',{name:'查看结果'}).click();
+  await page.locator('#report > .report-panel > .table-scroll tbody tr').waitFor();
+  assert.equal(await page.locator('#report > .report-panel > .table-scroll tbody tr').count(),1);
+  assert.equal(await page.locator('#report .stat').filter({hasText:'测试项成功率'}).locator('.stat-value').textContent(),'100%');
+  await page.locator('#report select[aria-label="统计分位数"]').selectOption('tail');
+  await page.getByRole('button',{name:'答案速度 / tok/s ↕'}).click();
+  await page.screenshot({path:'/workspace/.qa/results.png',fullPage:true});
+  const downloadPromise=page.waitForEvent('download');
+  await page.locator('#download-html').click();
+  const download=await downloadPromise;
+  await download.saveAs('/workspace/.qa/report.html');
+  await page.goto('file:///workspace/.qa/report.html');
+  await page.locator('#report > .report-panel > .table-scroll tbody tr').waitFor();
+  assert.equal(await page.locator('#report .stat').filter({hasText:'测试项成功率'}).locator('.stat-value').textContent(),'100%');
+  assert.deepEqual(errors,[]);
+  await browser.close();
+  console.log('Browser report: live result, tail statistics, sorting, HTML download and offline rendering passed.');
+})().catch(error=>{console.error(error);process.exit(1)});

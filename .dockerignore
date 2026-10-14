@@ -1,0 +1,15 @@
+.git
+.agents
+.codex
+.venv
+.runtime
+.bootstrap
+__pycache__
+results
+state
+.token-cache
+config.local.*
+.env
+deploy/.admin-token
+*.log
+.qa

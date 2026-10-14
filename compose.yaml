@@ -1,0 +1,15 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:?请先 export DASHSCOPE_API_KEY}
+      DASHSCOPE_BASE_URL: ${DASHSCOPE_BASE_URL:-https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1}
+      RESULTS_ROOT: /app/results
+      CONFIG_PATH: /app/state/config.local.yaml
+    volumes:
+      - ./results:/app/results
+      - ./state:/app/state
+    stop_grace_period: 30s

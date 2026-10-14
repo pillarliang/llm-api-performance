@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LLM API 性能评测报告</title>
+<style>__REPORT_CSS__</style>
+</head>
+<body class="offline-report">
+<main>
+<div id="report"></div>
+<noscript>请启用 JavaScript 以查看报告及筛选数据。</noscript>
+</main>
+<script id="report-data" type="application/json">__RESULT_DATA__</script>
+<script>__REPORT_JS__</script>
+<script>window.renderReport(document.getElementById("report"), JSON.parse(document.getElementById("report-data").textContent));</script>
+</body>
+</html>
