@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 
 import openai
+from connections import suggest_base_url
 
 
 class CatalogError(Exception):
@@ -69,6 +70,11 @@ class ModelCatalog:
                 return dict(data, stale=False)
             except (openai.APIError, TimeoutError, OSError, ValueError, CatalogError) as exc:
                 message = f"获取模型列表失败（HTTP {exc.status_code}）" if isinstance(exc, openai.APIStatusError) else "获取模型列表失败，请稍后重试"
+                if isinstance(exc, openai.APIStatusError) and exc.status_code == 404:
+                    suggested = suggest_base_url(base_url)
+                    message = f"模型列表地址不存在（HTTP 404）。当前请求：{base_url}/models。"
+                    message += (f"你可能填入了具体接口路径，建议 Base URL：{suggested}。" if suggested else
+                                "请确认 Base URL 是 API 基础地址；若该来源未提供 /models，可手动添加模型。")
                 if cached:
                     return dict(cached["data"], stale=True, error=message)
                 raise CatalogError(message) from exc

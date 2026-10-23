@@ -22,7 +22,7 @@ class ServerTests(unittest.TestCase):
         self.configuration = Path(self.temp.name) / "state" / "config.local.yaml"
         self.patches = [patch.dict(os.environ, {"DASHSCOPE_API_KEY": "private-model-key"}),
                         patch.object(server, "RESULTS", self.results), patch.object(server, "CONFIG", self.configuration),
-                        patch.object(server, "active_task", None), patch.object(server, "active_state", None)]
+                        patch.object(server, "run_registry", {}), patch.object(server, "active_task", None), patch.object(server, "active_state", None)]
         for item in self.patches:
             item.start(); self.addCleanup(item.stop)
         self.client = TestClient(server.app)

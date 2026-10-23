@@ -1,0 +1,30 @@
+const {chromium}=require('playwright');
+const assert=require('node:assert/strict');
+const fs=require('node:fs');
+(async()=>{
+ const root='/work',shots='/qa';
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox','--disable-dev-shm-usage','--disable-gpu','--renderer-process-limit=1','--no-zygote']});
+ const page=await browser.newPage({viewport:{width:1440,height:1000}});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ const metric=n=>({p50:n,mean:n,p95:n,p5:n});
+ const data={settings:{name:'provider-comparison',version:'v1'},status:'complete',data_source:'synthetic_fixture',summary:['Provider A','Provider B'].map((name,i)=>({provider_id:`source-${i}`,provider_name:name,endpoint_id:`model-${i}`,model:'same-model',base_url:`https://provider-${i}.test/v1`,profile:'default',task:'summary',target_input_tokens:512,benchmark_input_tokens:512,concurrency:1,planned_cases:3,successful_cases:3,requests:3,metrics:{ttft_ms:metric(100+i*100),ttfa_seconds:metric(.1+i*.1),output_speed_tps:metric(30+i*10),e2e_seconds:metric(1+i),max_answer_gap_seconds:metric(.1)},errors:{}}))};
+ const html=`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${fs.readFileSync(root+'/static/report.css','utf8')}</style></head><body class="offline-report"><main><div id="report"></div></main><script>${fs.readFileSync(root+'/static/results.js','utf8')}</script><script>renderReport(document.getElementById('report'),${JSON.stringify(data)})</script></body></html>`;
+ fs.writeFileSync(shots+'/providers-offline.html',html);
+ await page.goto('file://'+shots+'/providers-offline.html');
+ const rows=page.locator('#report > .report-panel > .table-scroll tbody tr');
+ assert.equal(await rows.count(),2);
+ assert.deepEqual(await rows.locator('td:first-child').allTextContents(),['Provider A','Provider B']);
+ assert.deepEqual(await page.locator('.report-model-legend .report-legend-item').allTextContents(),['Provider A · same-model','Provider B · same-model']);
+ await page.getByLabel('筛选来源',{exact:true}).selectOption('source-1');assert.equal(await rows.count(),1);assert.match(await rows.first().textContent(),/Provider B/);
+ await page.getByLabel('筛选模型',{exact:true}).selectOption('same-model');assert.equal(await rows.count(),1);
+ await page.getByRole('button',{name:'重置筛选',exact:true}).click();assert.equal(await rows.count(),2);
+ await page.getByRole('button',{name:'来源 ↕',exact:true}).click();
+ const csvEvent=page.waitForEvent('download');await page.getByRole('button',{name:'导出 CSV',exact:true}).click();const csv=await csvEvent;await csv.saveAs(shots+'/providers.csv');
+ const content=fs.readFileSync(shots+'/providers.csv','utf8');assert.match(content,/Provider ID/);assert.match(content,/Provider A/);assert.match(content,/Provider B/);assert.match(content,/source-1/);
+ await page.screenshot({path:shots+'/providers-report.png',fullPage:true});
+ await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+ // Older reports have no provider metadata; endpoint hosts remain distinguishable.
+ await page.evaluate(data=>{data.summary.forEach(g=>{delete g.provider_name;delete g.provider_id;});renderReport(document.getElementById('report'),data);},data);
+ assert.deepEqual(await rows.locator('td:first-child').allTextContents(),['provider-0.test','provider-1.test']);
+ assert.deepEqual(errors,[]);await browser.close();console.log('PASS: same-model provider rows, source/model filtering, provider labels, CSV export, offline HTML, legacy reports and mobile layout.');
+})().catch(e=>{console.error(e);process.exit(1)});

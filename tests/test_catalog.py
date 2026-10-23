@@ -86,3 +86,37 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CatalogError): await catalog.get("https://example.test/v1", "")
         with self.assertRaises(CatalogError): await catalog.get("https://example.test/v1", "private-key")
         self.assertFalse(self.path.exists())
+
+    async def test_404_explains_endpoint_and_suggestion_without_leaking_upstream_body(self):
+        import httpx
+        import openai
+        from catalog import CatalogError
+        def handler(request):
+            return httpx.Response(404, json={'error': {'message': 'private-key must not leak'}})
+        def factory(**kwargs):
+            return openai.AsyncOpenAI(**kwargs, http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        catalog = self.catalog_type(None, factory)
+        with self.assertRaises(CatalogError) as caught:
+            await catalog.get('https://api.deepseek.com/chat/completions/v1', 'private-key')
+        message = str(caught.exception)
+        self.assertIn('建议 Base URL：https://api.deepseek.com。', message)
+        self.assertIn('/chat/completions/v1/models', message)
+        self.assertNotIn('private-key', message)
+        with self.assertRaises(CatalogError) as caught:
+            await catalog.get('https://proxy.test/custom/v1', 'private-key')
+        self.assertIn('未提供 /models', str(caught.exception))
+        self.assertNotIn('建议 Base URL', str(caught.exception))
+
+    async def test_stale_404_keeps_diagnostic_and_existing_models(self):
+        import httpx
+        import openai
+        catalog = self.catalog_type(None, self.client_factory([['old-model']], []))
+        await catalog.get('https://proxy.test/v1', 'private-key')
+        def failing(**kwargs):
+            raise openai.NotFoundError('private-key must not leak', response=httpx.Response(404, request=httpx.Request('GET', 'https://proxy.test/v1/models')), body=None)
+        catalog.client_factory = failing
+        result = await catalog.get('https://proxy.test/v1', 'private-key', refresh=True)
+        self.assertTrue(result['stale'])
+        self.assertEqual(result['models'][0]['id'], 'old-model')
+        self.assertIn('未提供 /models', result['error'])
+        self.assertNotIn('private-key', result['error'])

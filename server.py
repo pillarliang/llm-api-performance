@@ -10,9 +10,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import yaml
 
-from benchmark import BenchmarkRun, plan, read_records, validate_config
+from benchmark import BenchmarkRun, atomic_json, now, plan, read_records, validate_config
 from catalog import CatalogError, ModelCatalog
-from connections import default_connection, normalize_base, resolve_connection
+from connections import bind_providers, default_connection, normalize_base, resolve_connection
 from report import build_report
 
 ROOT = Path(__file__).resolve().parent
@@ -22,18 +22,39 @@ DEFAULT = ROOT / "config.focus.example.yaml"
 active_task = None
 active_state = None
 run_guard = asyncio.Lock()
+run_registry = {}
 model_catalog = ModelCatalog(CONFIG.parent / "model-catalog.json")
 
 
 @asynccontextmanager
 async def lifespan(app):
-    yield
-    if active_task and not active_task.done():
-        active_task.cancel()
+    # Only public job metadata is persisted; API credentials remain in memory.
+    for path in sorted((RESULTS / ".jobs").glob("*.json")):
         try:
-            await active_task
-        except asyncio.CancelledError:
-            pass
+            state = json.loads(path.read_text(encoding="utf-8"))
+            directory = (RESULTS / state["path"]).resolve()
+            if not directory.is_relative_to(RESULTS):
+                continue
+            if state["status"] in {"starting", "running"}:
+                state.update(status="interrupted", error="服务重启，任务已中断；可使用增量模式补跑。")
+                records = [r for r in read_records(directory / "requests.jsonl")
+                           if r["session_id"] == state["session_id"] and r["phase"] == "measured"]
+                completed = {r["case_id"]: r for r in records if r.get("case_complete")}
+                state["progress"] = dict(completed=len(completed), succeeded=sum(r["success"] for r in completed.values()),
+                                         failed=sum(not r["success"] for r in completed.values()), active=0, retrying=0,
+                                         attempts=len(records), retries=len(records)-len({r["case_id"] for r in records}))
+                atomic_json(path, state)
+                # This service owns these jobs; a crashed previous worker may leave a lock.
+                (directory / ".run.lock").unlink(missing_ok=True)
+            state["has_results"] = (directory / "results.json").exists()
+            run_registry[state["job_id"]] = dict(state=state, task=None, run=None)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    yield
+    tasks = [entry["task"] for entry in run_registry.values() if entry["task"] and not entry["task"].done()]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app = FastAPI(title="Model Studio · LLM 性能评测", lifespan=lifespan, docs_url=None, redoc_url=None)
@@ -88,6 +109,8 @@ async def custom_models(request: Request):
 
 def bind_connection(config, data, require_key=False):
     try:
+        if 'providers' in config:
+            return bind_providers(config, data.get('connections', []), default_base(), require_key=require_key)
         connection = data.get("connection", {"mode": "default"})
         base, name, key = resolve_connection(connection, default_base(), require_key=require_key)
         for model in config["models"]:
@@ -106,14 +129,14 @@ def current_config():
 
 
 def checked_config(content):
-    config = validate_config(yaml.safe_load(content))
+    config = validate_config(yaml.safe_load(content), allow_empty_models=True)
     # Browser configuration can only read bundled task assets.
     for task in config["tasks"]:
         for field in ("template_file", "corpus_file"):
             path = (ROOT / task[field]).resolve()
             if not path.is_relative_to(ROOT / "prompts"):
                 raise ValueError("Web 配置的任务文件必须位于 prompts/ 目录")
-    return validate_config(config, ROOT)
+    return validate_config(config, ROOT, allow_empty_models=True)
 
 
 async def payload(request):
@@ -129,12 +152,16 @@ async def payload(request):
         raise HTTPException(400, "请求必须为 JSON 对象")
 
 
-def parse_config(data):
+def parse_config(data, require_key=False):
     try:
         content = yaml.safe_dump(data["config"], allow_unicode=True) if isinstance(data.get("config"), dict) else data.get("yaml")
         if not isinstance(content, str):
             raise ValueError("缺少 YAML 配置")
-        return checked_config(content)
+        config = yaml.safe_load(content)
+        if not isinstance(config, dict):
+            raise ValueError('配置必须是对象')
+        credentials = bind_connection(config, data, require_key=require_key)
+        return checked_config(yaml.safe_dump(config, allow_unicode=True)), credentials
     except (ValueError, TypeError, KeyError, yaml.YAMLError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
@@ -150,18 +177,15 @@ async def get_config():
 
 @app.post("/api/config/validate")
 async def validate_editor(request: Request):
-    config = parse_config(await payload(request))
+    config, _ = parse_config(await payload(request))
     return {"config": config, "yaml": yaml.safe_dump(config, allow_unicode=True, sort_keys=False)}
 
 
 @app.put("/api/config")
 async def save_config(request: Request):
     data = await payload(request)
-    config = parse_config(data)
-    bind_connection(config, data, require_key=True)
+    config, _ = parse_config(data)
     async with run_guard:
-        if active_task and not active_task.done():
-            raise HTTPException(409, "评测运行中，结束或停止后再保存配置")
         CONFIG.parent.mkdir(parents=True, exist_ok=True)
         temporary = CONFIG.with_suffix(".yaml.tmp")
         temporary.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
@@ -172,8 +196,7 @@ async def save_config(request: Request):
 @app.post("/api/plan")
 async def get_plan(request: Request):
     data = await payload(request)
-    config = parse_config(data)
-    bind_connection(config, data, require_key=True)
+    config, _ = parse_config(data, require_key=True)
     try:
         description, prepared, _ = await asyncio.to_thread(plan, config, ROOT, RESULTS, data.get("mode", "incremental"))
     except (ValueError, OSError) as exc:
@@ -181,79 +204,117 @@ async def get_plan(request: Request):
     return dict(description, groups_detail=[g for _, _, g in prepared])
 
 
-async def execute(run):
-    global active_state
-    active_state["status"] = "running"
+def job_snapshot(entry):
+    state = dict(entry["state"])
+    run = entry["run"]
+    if run is not None and hasattr(run, "progress"):
+        state["progress"] = dict(run.progress)
+    progress = state.get("progress", {})
+    state["session_attempts"] = progress.get("attempts", 0)
+    state["session_successes"] = progress.get("succeeded", 0)
+    return state
+
+
+def persist_job(entry):
+    (RESULTS / ".jobs").mkdir(parents=True, exist_ok=True)
+    atomic_json(RESULTS / ".jobs" / (entry["state"]["job_id"] + ".json"), job_snapshot(entry))
+
+
+async def execute(run, entry):
+    state = entry["state"]
+    state["status"] = "running"
     try:
         await run.run()
-        active_state["status"] = "finished"
+        state["status"] = "finished"
     except asyncio.CancelledError:
-        active_state["status"] = "cancelled"
+        state["status"] = "cancelled"
     except Exception:
-        # Do not return SDK exception strings that may contain HTTP credentials.
-        active_state.update(status="error", error="执行失败，请检查结果日志、端点参数及服务配置")
+        state.update(status="error", error="执行失败，请检查结果、端点参数及服务配置")
     finally:
         if run.credentials is not None:
             run.credentials.clear()
         source = run.output / "results.json"
+        state["has_results"] = source.exists()
         if source.exists():
             try:
                 build_report(source)
             except (OSError, ValueError):
-                active_state.update(status="error", error="评测结果已保存，但 HTML 报告生成失败，可通过 report.py 重建")
+                state.update(status="error", error="评测结果已保存，但 HTML 报告生成失败，可通过 report.py 重建")
+        state["finished_at"] = now()
+        state.update(job_snapshot(entry))
+        persist_job(entry)
+        entry["run"] = None
 
 
 @app.post("/api/runs")
 async def start_run(request: Request):
     global active_task, active_state
     data = await payload(request)
-    config = parse_config(data)
-    credentials = bind_connection(config, data, require_key=True)
+    config, credentials = parse_config(data, require_key=True)
     async with run_guard:
-        if active_task and not active_task.done():
-            raise HTTPException(409, "已有评测正在运行")
         try:
-            description, prepared, output = await asyncio.to_thread(plan, config, ROOT, RESULTS, data.get("mode", "incremental"))
+            description, prepared, output = await asyncio.to_thread(plan, config, ROOT, RESULTS, data.get("mode", "full"))
             records = read_records(output / "requests.jsonl")
             from benchmark import plan_jobs
             jobs = plan_jobs(prepared, records, config["repetitions"])
             missing = {m["api_key_env"] for m, _, g in prepared if jobs[g["group_id"]] and not credentials.get(m["api_key_env"])}
             if missing:
                 raise ValueError("缺少环境变量：" + ", ".join(sorted(missing)))
-            if (output / ".run.lock").exists():
-                raise ValueError("该 run 已锁定，请检查是否正在通过命令行执行")
+            reserved = any(e["state"]["path"] == str(output.relative_to(RESULTS)) and e["state"]["status"] in {"starting", "running"} for e in run_registry.values())
+            if reserved or (output / ".run.lock").exists():
+                raise HTTPException(409, "该运行正在执行，不能同时增量补跑；请选择「新建运行」开启独立任务。")
             run = BenchmarkRun(config, ROOT, output, prepared, credentials=credentials)
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
-        active_state = dict(status="starting", path=str(output.relative_to(RESULTS)), session_id=run.session_id, plan=description)
-        active_task = asyncio.create_task(execute(run))
-    return active_state
+        active_state = dict(job_id=run.session_id, status="starting", name=config["name"], version=config["version"],
+                            started_at=now(), path=str(output.relative_to(RESULTS)), session_id=run.session_id, plan=description,
+                            targets=[dict(provider=m.get("provider_name", m["id"]), model=m["model"]) for m in config["models"] if m.get("enabled", True)],
+                            input_tokens=config["input_tokens"], concurrencies=config["concurrencies"])
+        entry = dict(state=active_state, task=None, run=run)
+        persist_job(entry)
+        run_registry[run.session_id] = entry
+        active_task = entry["task"] = asyncio.create_task(execute(run, entry))
+    return job_snapshot(entry)
+
+
+async def stop_entry(entry):
+    task = entry["task"]
+    if task and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if entry["state"]["status"] in {"starting", "running"}:
+            entry["state"]["status"] = "cancelled"
+            if entry["run"] and entry["run"].credentials is not None:
+                entry["run"].credentials.clear()
+            persist_job(entry)
+            entry["run"] = None
+    return {"stopped": True}
+
+
+@app.post("/api/jobs/{job_id}/stop")
+async def stop_job(job_id: str):
+    if job_id not in run_registry:
+        raise HTTPException(404, "任务不存在")
+    return await stop_entry(run_registry[job_id])
 
 
 @app.post("/api/stop")
 async def stop():
-    if active_task and not active_task.done():
-        active_task.cancel()
-        try:
-            await active_task
-        except asyncio.CancelledError:
-            if active_state:
-                active_state["status"] = "cancelled"
+    if active_state and active_state.get("job_id") in run_registry:
+        return await stop_entry(run_registry[active_state["job_id"]])
     return {"stopped": True}
+
+
+@app.get("/api/jobs")
+async def list_jobs():
+    return [job_snapshot(entry) for entry in reversed(list(run_registry.values()))]
 
 
 @app.get("/api/status")
 async def status():
-    state = dict(active_state) if active_state else {"status": "idle"}
-    if active_state:
-        directory = RESULTS / active_state["path"]
-        # The event loop writes complete lines synchronously; status runs between writes.
-        records = read_records(directory / "requests.jsonl")
-        state["session_attempts"] = sum(r["session_id"] == state["session_id"] and r["phase"] == "measured" for r in records)
-        state["session_successes"] = sum(r["session_id"] == state["session_id"] and r["phase"] == "measured" and r["success"] for r in records)
-        events = directory / "events.jsonl"
-        state["events"] = read_records(events)[-30:]
-    return state
+    if active_state and active_state.get("job_id") in run_registry:
+        return job_snapshot(run_registry[active_state["job_id"]])
+    return dict(active_state) if active_state else {"status": "idle"}
 
 
 @app.get("/api/runs")

@@ -8,9 +8,14 @@ window.renderReport = function renderReport(root, data) {
     return node;
   };
   const fmt = value => value == null || !Number.isFinite(value) ? "—" : value.toLocaleString("zh-CN", {maximumFractionDigits:2});
-  const groups = data.summary || [];
+  const sourceName = group => {
+    if(group.provider_name)return group.provider_name;
+    try{return new URL(group.base_url).host;}catch{return group.endpoint_id||"历史来源";}
+  };
+  const groups = (data.summary || []).map(group=>({...group,provider_id:group.provider_id||group.base_url||group.endpoint_id||"legacy",provider_name:sourceName(group)}));
+  const modelLabel = group => `${group.provider_name} · ${group.model||group.endpoint_id}`;
   const settings = data.environment || data.settings || {};
-  const modelKey = group => JSON.stringify([group.endpoint_id ?? null, group.model ?? null]);
+  const modelKey = group => JSON.stringify([group.provider_id, group.endpoint_id ?? null, group.model ?? null]);
   const models = new Map();
   const order = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "adaptive"];
   [...groups].sort((a,b) => modelKey(a).localeCompare(modelKey(b))).forEach(group => {
@@ -66,7 +71,7 @@ window.renderReport = function renderReport(root, data) {
   const profileOptions = el("div",undefined,"report-options");
   profilePicker.menu.append(profileOptions);
   models.forEach(model => {
-    const name = model.group.model || model.group.endpoint_id || "未命名模型";
+    const name = modelLabel(model.group);
     const identity = `${name}（${model.group.endpoint_id || "默认端点"}）`;
     const label = el("label",undefined,"report-option");
     const checkbox = el("input");checkbox.type="checkbox";checkbox.checked=true;
@@ -92,10 +97,10 @@ window.renderReport = function renderReport(root, data) {
   });
   allModels.addEventListener("click",()=>{models.forEach(m=>{m.enabled=true;});update();});
   noModels.addEventListener("click",()=>{models.forEach(m=>{m.enabled=false;});update();});
-  for(const [key,title] of [["task","任务"],["target_input_tokens","输入 Token"],["concurrency","并发"]]) {
+  for(const [key,title] of [["provider_id","来源"],["model","模型"],["task","任务"],["target_input_tokens","输入 Token"],["concurrency","并发"]]) {
     const label=el("label",title,"report-filter");const select=el("select");
     select.setAttribute("aria-label",`筛选${title}`);select.append(new Option("全部",""));
-    [...new Set(groups.map(g=>String(g[key])))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(value=>select.append(new Option(value==="null"?"未分档":value,value)));
+    [...new Set(groups.map(g=>String(g[key])))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(value=>select.append(new Option(key==="provider_id"?groups.find(g=>g.provider_id===value).provider_name:value==="null"?"未分档":value,value)));
     select.addEventListener("change",update);selector[key]=select;label.append(select);filters.append(label);
   }
   const statLabel=el("label","统计值","report-filter");const statistic=el("select");
@@ -108,7 +113,7 @@ window.renderReport = function renderReport(root, data) {
   scroll.setAttribute("role","region");scroll.setAttribute("aria-label","性能指标表，可横向滚动");
   const table=el("table"),thead=el("thead"),head=el("tr"),body=el("tbody");
   const metrics=[["ttft_ms","TTFT / ms"],["ttfa_seconds","TTFA / s"],["output_speed_tps","答案速度 / tok/s"],["e2e_seconds","E2E / s"],["max_answer_gap_seconds","最大间隔 / s"]];
-  const columns=[["model","模型 / 推理强度"],["task","任务"],["benchmark_input_tokens","输入 Token"],["concurrency","并发"],["success_rate","成功率"],...metrics];
+  const columns=[["provider_name","来源"],["model","模型 / 推理强度"],["task","任务"],["benchmark_input_tokens","输入 Token"],["concurrency","并发"],["success_rate","成功率"],...metrics];
   let sortKey="model",direction=1,visible=[];
   const sortHeaders=[];
   columns.forEach(([key,name])=>{
@@ -125,7 +130,7 @@ window.renderReport = function renderReport(root, data) {
   function detail(title){const d=el("details",undefined,"report-detail");d.append(el("summary",title));diagnostics.append(d);return d;}
   const usage=detail("查看 Token 用量与历史失败");
   const usageScroll=el("div",undefined,"table-scroll"),usageTable=el("table"),usageHead=el("thead"),usageRow=el("tr"),usageBody=el("tbody");
-  ["模型 / 推理强度","任务","输入 Token / 并发","答案 Token · 均值","服务端输入 · 均值","思考 Token · 均值","历史失败"].forEach(name=>usageRow.append(el("th",name)));
+  ["来源","模型 / 推理强度","任务","输入 Token / 并发","答案 Token · 均值","服务端输入 · 均值","思考 Token · 均值","历史失败"].forEach(name=>usageRow.append(el("th",name)));
   usageHead.append(usageRow);usageTable.append(usageHead,usageBody);usageScroll.append(usageTable);usage.append(usageScroll);
   const raw=detail("查看所选组的完整汇总 JSON"),pre=el("pre");raw.append(pre);
   const environment=detail("运行环境与会话");
@@ -157,7 +162,7 @@ window.renderReport = function renderReport(root, data) {
   }
   function modelCell(group){
     const td=el("td"),name=el("span",group.model||group.endpoint_id,"report-model-name");
-    td.title=`端点：${group.endpoint_id||"默认"}`;td.append(name,el("span",group.profile??"default","cell-sub"));return td;
+    td.title=`${group.provider_name} · ${group.base_url||group.endpoint_id||"默认"}`;td.append(name,el("span",group.profile??"default","cell-sub"));return td;
   }
   function update(){
     let enabled=0,profileCount=0,profileTotal=0;
@@ -181,19 +186,19 @@ window.renderReport = function renderReport(root, data) {
     });
     legend.replaceChildren();
     const visibleModels=new Set(visible.map(modelKey));
-    models.forEach((m,key)=>{if(!visibleModels.has(key))return;const item=el("span",undefined,"report-legend-item");color(item,m);const dot=el("span",undefined,"report-swatch");dot.setAttribute("aria-hidden","true");item.append(dot,el("span",m.group.model||m.group.endpoint_id));item.title=`端点：${m.group.endpoint_id}`;legend.append(item);});
+    models.forEach((m,key)=>{if(!visibleModels.has(key))return;const item=el("span",undefined,"report-legend-item");color(item,m);const dot=el("span",undefined,"report-swatch");dot.setAttribute("aria-hidden","true");item.append(dot,el("span",modelLabel(m.group)));item.title=`端点：${m.group.endpoint_id}`;legend.append(item);});
     body.replaceChildren();usageBody.replaceChildren();
     const maxSpeed=Math.max(1,...visible.map(g=>metric(g,"output_speed_tps")||0));
     visible.forEach(group=>{
       const tr=el("tr",undefined,"report-model-row");color(tr,models.get(modelKey(group)));
-      tr.append(modelCell(group),el("td",group.task),el("td",fmt(group.benchmark_input_tokens),"metric-cell"),el("td",fmt(group.concurrency),"metric-cell"));
+      tr.append(el("td",group.provider_name),modelCell(group),el("td",group.task),el("td",fmt(group.benchmark_input_tokens),"metric-cell"),el("td",fmt(group.concurrency),"metric-cell"));
       const rate=value(group,"success_rate");tr.append(el("td",rate==null?"—":fmt(rate*100)+"%",rate===1?"report-ok":"report-bad"));
       metrics.forEach(([key])=>{const n=metric(group,key),td=el("td",undefined,"metric-cell");
         if(key==="output_speed_tps"&&n!=null){const bar=el("span",undefined,"report-inline-bar");bar.style.width=`${48*Math.max(0,n)/maxSpeed}px`;bar.setAttribute("aria-hidden","true");td.append(bar);}
         td.append(el("span",fmt(n)));tr.append(td);
       });body.append(tr);
       const u=el("tr",undefined,"report-model-row");color(u,models.get(modelKey(group)));
-      u.append(modelCell(group),el("td",group.task),el("td",`${fmt(group.benchmark_input_tokens)} / ${group.concurrency}`,"metric-cell"));
+      u.append(el("td",group.provider_name),modelCell(group),el("td",group.task),el("td",`${fmt(group.benchmark_input_tokens)} / ${group.concurrency}`,"metric-cell"));
       ["benchmark_answer_tokens","prompt_tokens","reasoning_tokens"].forEach(key=>u.append(el("td",fmt(group.metrics?.[key]?.mean),"metric-cell")));
       u.append(el("td",Object.entries(group.errors||{}).map(([k,n])=>`${k}: ${n}`).join(" · ")||"—"));usageBody.append(u);
     });
@@ -203,7 +208,7 @@ window.renderReport = function renderReport(root, data) {
     pre.textContent=JSON.stringify(visible,null,2);csv.disabled=!visible.length;
   }
   csv.addEventListener("click",()=>{
-    const exportColumns=[["model","Model"],["profile","Profile"],["endpoint_id","Endpoint"],...columns.slice(1)];
+    const exportColumns=[["provider_name","Provider"],["provider_id","Provider ID"],["model","Model"],["profile","Profile"],["endpoint_id","Endpoint"],["base_url","Base URL"],...columns.slice(2)];
     const escape=v=>'"'+String(v??"").replace(/^[=+@-]/,"'$&").replaceAll('"','""')+'"';
     const rows=[exportColumns.map(([,title])=>title),...visible.map(g=>exportColumns.map(([key])=>value(g,key)))];
     const url=URL.createObjectURL(new Blob(["\ufeff"+rows.map(row=>row.map(escape).join(",")).join("\r\n")],{type:"text/csv;charset=utf-8"}));

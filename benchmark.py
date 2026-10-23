@@ -23,6 +23,7 @@ import yaml
 
 from metrics import measure, summarize, totals
 from tokens import TOKENIZER, count, make_prompt
+from connections import normalize_providers
 
 CONFIG_PATH = Path(__file__).with_name("config.example.yaml")
 UPDATE_MODE = "incremental"
@@ -48,7 +49,7 @@ def safe_name(value):
     return text
 
 
-def validate_config(config, config_dir=None):
+def validate_config(config, config_dir=None, allow_empty_models=False):
     if not isinstance(config, dict):
         raise ValueError("配置必须是 YAML 对象")
     for key in ("name", "version", "repetitions", "warmup", "concurrencies", "input_tokens", "timeout_seconds", "cache_state", "tasks", "models"):
@@ -66,6 +67,9 @@ def validate_config(config, config_dir=None):
                 continue
             if type(value) is not int or value <= 0:
                 raise ValueError(f"{key} 必须包含正整数")
+    retries = config.get("max_retries", 0)
+    if type(retries) is not int or not 0 <= retries <= 5:
+        raise ValueError("max_retries 必须是 0 到 5 的整数")
     timeout = config["timeout_seconds"]
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout_seconds 必须是有限正数")
@@ -76,7 +80,7 @@ def validate_config(config, config_dir=None):
         json.dumps(params, allow_nan=False)
     parameters(config)
     for collection in ("tasks", "models"):
-        if not isinstance(config[collection], list) or not config[collection]:
+        if not isinstance(config[collection], list) or (not config[collection] and not (collection == 'models' and allow_empty_models)):
             raise ValueError(f"{collection} 必须是非空列表")
         if any(not isinstance(item, dict) for item in config[collection]):
             raise ValueError(f"{collection} 的条目必须是对象")
@@ -89,7 +93,15 @@ def validate_config(config, config_dir=None):
                 raise ValueError(f"任务缺少 {field}")
             if config_dir is not None and not (Path(config_dir) / task[field]).is_file():
                 raise ValueError(f"任务文件不存在：{task[field]}")
+    providers = None
+    if 'providers' in config:
+        config['providers'] = normalize_providers(config['providers'])
+        providers = {p['id']: p for p in config['providers']}
     for model in config["models"]:
+        if providers is not None:
+            if not isinstance(model.get('provider_id'), str) or model['provider_id'] not in providers:
+                raise ValueError('模型引用的连接源不存在')
+            model['provider_name'] = providers[model['provider_id']]['name']
         if model.get("base_url_env"):
             if not isinstance(model["base_url_env"], str):
                 raise ValueError("base_url_env 必须是环境变量名称")
@@ -130,6 +142,11 @@ def make_group(config, task, model, profile, prompt, target, concurrency):
                  tokenizer=TOKENIZER, concurrency=concurrency, cache_state=config["cache_state"],
                  timeout_seconds=config["timeout_seconds"], warmup=config["warmup"], include_usage=model.get("include_usage", True))
     group["group_id"] = hashlib.sha256(json.dumps(group, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+    # endpoint_id already identifies a source/model pair. Keep metadata outside
+    # the hash so source labels and migration from legacy configs preserve work.
+    if model.get('provider_id'):
+        group['provider_id'] = model['provider_id']
+        group['provider_name'] = model.get('provider_name', model['provider_id'])
     return group
 
 
@@ -291,6 +308,7 @@ class BenchmarkRun:
         self.started_at = now()
         self.records = []
         self.skipped = 0
+        self.progress = dict(completed=0, succeeded=0, failed=0, active=0, retrying=0, retries=0, attempts=0, warmups=0)
         self.settings = dict(config, session_id=self.session_id, tokenizer=TOKENIZER,
                              environment={"python": platform.python_version(), "platform": platform.platform(),
                                           "openai": importlib.metadata.version("openai"), "tiktoken": importlib.metadata.version("tiktoken")})
@@ -309,15 +327,44 @@ class BenchmarkRun:
 
     async def run_one(self, client, prompt, group, index, phase):
         case = f'{group["group_id"]}-{index:04d}'
-        attempt = 1 + max((r["attempt"] for r in self.records if r["case_id"] == case), default=0)
-        record = new_record(group, index, phase, self.session_id, attempt)
-        try:
-            await request(client, prompt, record, self.event)
-        except Exception:
-            record["error_type"] = record["error_type"] or "internal_error"
-            raise
-        finally:
-            self.save(record)
+        measured = phase == "measured"
+        # Warmups never consume the measured retry budget or progress denominator.
+        budget = self.config.get("max_retries", 0) if measured else 0
+        for retry in range(budget + 1):
+            attempt = 1 + max((r["attempt"] for r in self.records if r["case_id"] == case), default=0)
+            record = new_record(group, index, phase, self.session_id, attempt)
+            again = False
+            if measured:
+                self.progress["active"] += 1
+                self.progress["attempts"] += 1
+                self.progress["retries"] += int(retry > 0)
+            try:
+                await request(client, prompt, record, self.event)
+                transient = record["error_type"] in {"timeout", "rate_limit", "connection_error", "stream_interrupted"}
+                transient |= record["error_type"] == "http_error" and (record.get("status_code") == 408 or 500 <= record.get("status_code", 0) <= 599)
+                again = not record["success"] and transient and retry < budget
+                record["case_complete"] = not again
+            except Exception:
+                record["error_type"] = record["error_type"] or "internal_error"
+                raise
+            finally:
+                if measured:
+                    self.progress["active"] -= 1
+                self.save(record)
+            if not again:
+                if measured:
+                    self.progress["completed"] += 1
+                    self.progress["succeeded" if record["success"] else "failed"] += 1
+                else:
+                    self.progress["warmups"] += 1
+                return
+            delay = min(2 ** retry, 16)
+            self.progress["retrying"] += 1
+            self.event("retry_scheduled", case_id=case, delay_seconds=delay, retry=retry + 1)
+            try:
+                await asyncio.sleep(delay)
+            finally:
+                self.progress["retrying"] -= 1
 
     async def run_group(self, client, prompt, group, jobs):
         if not jobs:

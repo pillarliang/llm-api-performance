@@ -23,7 +23,7 @@ class ConnectionTests(unittest.TestCase):
         self.config_path = self.root / 'config.yaml'
         for item in [patch.dict(os.environ, {'DASHSCOPE_API_KEY': 'server-secret', 'DASHSCOPE_BASE_URL': 'https://sg.test/v1'}),
                      patch.object(server, 'CONFIG', self.config_path), patch.object(server, 'RESULTS', self.root/'results'),
-                     patch.object(server, 'active_task', None), patch.object(server, 'active_state', None)]:
+                     patch.object(server, 'run_registry', {}), patch.object(server, 'active_task', None), patch.object(server, 'active_state', None)]:
             item.start(); self.addCleanup(item.stop)
         self.client = TestClient(server.app)
         self.config = self.client.get('/api/config').json()['config']

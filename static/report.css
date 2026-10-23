@@ -13,7 +13,7 @@
 .performance-report .report-badge{display:inline-block;border-radius:20px;padding:5px 12px;background:#e8eefc;color:#234fab;font-size:12px;white-space:nowrap}
 .performance-report .report-synthetic{background:#fff0ce;color:#8b5600;padding:14px 20px;border:1px solid #f2d28b;border-radius:12px;margin-bottom:20px}
 .performance-report .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:20px 0}
-.performance-report .stat,.performance-report .report-panel{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:20px}
+.performance-report .stat,.performance-report .report-panel{border:1px solid #d6d6d6;border-radius:12px;background:var(--surface);padding:20px}
 .performance-report .stat-value{font:650 30px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif;letter-spacing:normal;font-variant-numeric:tabular-nums;color:var(--ink)}
 .performance-report .report-panel{margin-top:20px;min-width:0}
 .performance-report .report-filters{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-bottom:18px}
@@ -24,7 +24,8 @@
 .performance-report button:disabled{opacity:.45;cursor:default}
 .performance-report select,.performance-report summary{cursor:pointer}
 .performance-report input[type=checkbox]{min-width:0;width:15px;height:15px;min-height:0;margin:0;flex:none;accent-color:var(--blue)}
-.performance-report :is(button,select,input,summary):focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.performance-report :is(button,input[type=checkbox],input[type=radio],summary):focus-visible{outline:1px solid #68788c;outline-offset:2px}
+.performance-report :is(input:not([type=checkbox]):not([type=radio]),select,textarea):focus{outline:none;border-color:#68788c}
 .performance-report .report-picker{position:relative;margin:0;border:0;padding:0;min-width:180px}
 .performance-report .report-filter:first-child .report-picker{min-width:220px}
 .performance-report .report-picker>summary{display:flex;align-items:center;justify-content:space-between;gap:16px;list-style:none;font-weight:400;border:1px solid #cbd5e1;border-radius:7px;background:#fff;padding:8px 10px;font-size:14px;color:var(--ink)}
@@ -44,14 +45,14 @@
 .performance-report .report-profile-group:disabled{opacity:.45}
 .performance-report .report-profile-choices{display:flex;flex-wrap:wrap;gap:6px}
 .performance-report .report-profile{display:flex;align-items:center;gap:6px;padding:4px 7px;border:1px solid var(--line);border-radius:5px;font-size:12px;cursor:pointer}
-.performance-report .report-profile:has(input:checked){background:#e8eefc;border-color:#bdcffa;color:#234fab}
+.performance-report .report-profile:has(input:checked){background:#e8eefc;border-color:#bdcffa;color:#245ddd}
 .performance-report .report-model-legend{display:flex;flex-wrap:wrap;gap:8px 16px;margin:0 0 16px;font-size:12px}
 .performance-report .report-legend-item{display:inline-flex;align-items:center;gap:7px;overflow-wrap:anywhere}
 .performance-report .report-swatch{width:10px;height:10px;border-radius:50%;background:var(--model-color);flex:none}
 .performance-report .table-scroll{overflow:auto;border:0;border-radius:0;background:transparent}
 .performance-report table{border-collapse:collapse;border-spacing:0;width:100%;white-space:nowrap;font-size:13px;min-width:950px}
 .performance-report th,.performance-report td{text-align:left;padding:13px 12px;border-bottom:1px solid var(--line);font-size:13px}
-.performance-report th{font-size:12px;color:var(--muted);background:#f7f9fc;font-weight:600}
+.performance-report th{font-size:12px;color:var(--muted);background:#ededed;font-weight:600}
 .performance-report th button{font-size:12px;border:0;border-radius:0;padding:0;min-height:0;background:transparent;text-align:left;font-weight:600;color:inherit}
 .performance-report th[aria-sort=ascending],.performance-report th[aria-sort=descending]{color:var(--blue)}
 .performance-report th:nth-child(3),.performance-report th:nth-child(4),.performance-report th:nth-child(n+6){text-align:right}
