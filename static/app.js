@@ -317,33 +317,63 @@ $("start-run").addEventListener("click",()=>guarded($("start-run"),async()=>{
   const state=await(await api("/api/runs",{method:"POST",body:JSON.stringify(configPayload())})).json();
   running=true;showTab("history");await poll();notify("后台任务已创建，可继续新建评测");
 }));
+// Keep controls attached while polling so hover, focus and clicks survive updates.
+const jobViews=new Map(),historyViews=new Map();
+function updateText(element,text){if(element.textContent!==String(text))element.textContent=text;}
+function optionalText(element,text){element.hidden=!text;updateText(element,text);}
+function reconcileRows(container,rows){
+  const keep=new Set(rows);
+  for(const child of [...container.children])if(!keep.has(child))child.remove();
+  rows.forEach((row,index)=>{if(container.children[index]!==row)container.insertBefore(row,container.children[index]||null);});
+}
+function createJobView(id){
+  const card=node("article",undefined,"job-card");card.dataset.jobId=id;
+  const head=node("div",undefined,"job-heading"),title=node("div"),actions=node("div",undefined,"actions");
+  const view={card,title:node("h3"),date:node("span",undefined,"muted"),badge:node("span"),button:node("button"),
+    targets:node("p",undefined,"job-targets"),counts:node("strong"),percent:node("span",undefined,"mono"),
+    progress:node("div",undefined,"progress"),fill:node("div"),detail:node("p",undefined,"job-detail"),
+    warmup:node("p",undefined,"muted"),skipped:node("p",undefined,"muted"),error:node("p",undefined,"field-error")};
+  title.append(view.title,view.date);actions.append(view.badge,view.button);head.append(title,actions);
+  view.progress.setAttribute("role","progressbar");view.progress.setAttribute("aria-valuemin","0");view.progress.append(view.fill);
+  const counts=node("div",undefined,"job-counts");counts.append(view.counts,view.percent);
+  card.append(head,view.targets,counts,view.progress,view.detail,view.warmup,view.skipped,view.error);
+  view.button.addEventListener("click",()=>guarded(view.button,async()=>{
+    const job=view.job;
+    if(["starting","running"].includes(job.status)){
+      await api(`/api/jobs/${encodeURIComponent(job.job_id)}/stop`,{method:"POST"});await poll();
+    }else if(job.has_results)await viewRun({...job,run_id:job.path.split("/").pop()});
+  }));
+  return view;
+}
 function renderJobs(jobs){
-  $("job-list").replaceChildren();$("jobs-empty").hidden=jobs.length>0;
+  $("jobs-empty").hidden=jobs.length>0;
   const active=jobs.filter(job=>["starting","running"].includes(job.status)).length;
-  $("active-count").textContent=active?`${active} 个运行中`:"";
+  updateText($("active-count"),active?`${active} 个运行中`:"");
+  const rows=[],ids=new Set();
   for(const job of jobs){
+    ids.add(job.job_id);
+    if(!jobViews.has(job.job_id))jobViews.set(job.job_id,createJobView(job.job_id));
+    const view=jobViews.get(job.job_id);view.job=job;rows.push(view.card);
     const live=["starting","running"].includes(job.status),p=job.progress||{};
     const total=job.plan?.pending_calls||0,completed=p.completed||0,percent=total?Math.min(100,Math.round(completed/total*100)):live?0:100;
-    const card=node("article",undefined,"job-card");card.dataset.jobId=job.job_id;
-    const head=node("div",undefined,"job-heading"),title=node("div"),actions=node("div",undefined,"actions");
-    title.append(node("h3",`${job.name} · ${job.version}`),node("span",new Date(job.started_at).toLocaleString("zh-CN"),"muted"));
+    updateText(view.title,`${job.name} · ${job.version}`);updateText(view.date,new Date(job.started_at).toLocaleString("zh-CN"));
     const labels={starting:"准备中",running:"运行中",finished:p.failed?"已结束 · 有失败项":"已完成",cancelled:"已停止",error:"执行异常",interrupted:"已中断"};
-    actions.append(node("span",job.storage_pending?"结果上传中":labels[job.status]||job.status,`badge ${live||job.storage_pending?"blue":job.status==="finished"&&!p.failed?"green":"amber"}`));
-    if(live){
-      const stop=node("button","停止任务","text-button danger");
-      stop.addEventListener("click",()=>guarded(stop,async()=>{await api(`/api/jobs/${encodeURIComponent(job.job_id)}/stop`,{method:"POST"});await poll();}));actions.append(stop);
-    }else if(job.has_results){const view=node("button","查看结果");view.addEventListener("click",()=>guarded(view,()=>viewRun({...job,run_id:job.path.split("/").pop()})));actions.append(view);}
-    head.append(title,actions);card.append(head);
-    if(job.targets?.length)card.append(node("p",job.targets.map(t=>`${t.provider} / ${t.model}`).join(" · "),"job-targets"));
-    const progress=node("div",undefined,"progress");progress.setAttribute("role","progressbar");progress.setAttribute("aria-label",`${job.name} 完成进度`);progress.setAttribute("aria-valuenow",String(completed));progress.setAttribute("aria-valuemin","0");progress.setAttribute("aria-valuemax",String(total||1));
-    const fill=node("div");fill.style.width=`${percent}%`;progress.append(fill);
-    const counts=node("div",undefined,"job-counts");counts.append(node("strong",`已完成 ${completed} / ${total} 项`),node("span",`${percent}%`,"mono"));
-    card.append(counts,progress,node("p",`成功 ${p.succeeded||0} · 失败 ${p.failed||0} · 请求中 ${p.active||0} · 等待重试 ${p.retrying||0} · 已重试 ${p.retries||0} 次`,"job-detail"));
-    if(job.plan?.warmup_calls)card.append(node("p",`预热 ${p.warmups||0} / ${job.plan.warmup_calls} 次`,"muted"));
-    if(job.plan?.planned_cases>total)card.append(node("p",`已有 ${job.plan.planned_cases-total} 项成功，本轮跳过`,"muted"));
-    if(job.error)card.append(node("p",job.error,"field-error"));
-    $("job-list").append(card);
+    updateText(view.badge,job.storage_pending?"结果上传中":labels[job.status]||job.status);
+    view.badge.className=`badge ${live||job.storage_pending?"blue":job.status==="finished"&&!p.failed?"green":"amber"}`;
+    view.button.hidden=!live&&!job.has_results;view.button.className=live?"text-button danger":"";
+    updateText(view.button,live?"停止任务":"查看结果");
+    optionalText(view.targets,(job.targets||[]).map(t=>`${t.provider} / ${t.model}`).join(" · "));
+    view.progress.setAttribute("aria-label",`${job.name} 完成进度`);
+    view.progress.setAttribute("aria-valuenow",String(completed));view.progress.setAttribute("aria-valuemax",String(total||1));
+    view.fill.style.width=`${percent}%`;
+    updateText(view.counts,`已完成 ${completed} / ${total} 项`);updateText(view.percent,`${percent}%`);
+    updateText(view.detail,`成功 ${p.succeeded||0} · 失败 ${p.failed||0} · 请求中 ${p.active||0} · 等待重试 ${p.retrying||0} · 已重试 ${p.retries||0} 次`);
+    optionalText(view.warmup,job.plan?.warmup_calls?`预热 ${p.warmups||0} / ${job.plan.warmup_calls} 次`:"");
+    optionalText(view.skipped,job.plan?.planned_cases>total?`已有 ${job.plan.planned_cases-total} 项成功，本轮跳过`:"");
+    optionalText(view.error,job.error||"");
   }
+  for(const id of jobViews.keys())if(!ids.has(id))jobViews.delete(id);
+  reconcileRows($("job-list"),rows);
 }
 async function poll(){
   clearTimeout(pollTimer);
@@ -358,15 +388,30 @@ async function poll(){
   }catch(e){$("connection-label").textContent="连接中断";$("connection-dot").classList.remove("ready");error(e.message);}
   pollTimer=setTimeout(poll,running?1500:6000);
 }
+function createHistoryView(){
+  const view={row:node("tr"),name:node("span"),version:node("span",undefined,"cell-sub"),date:node("span"),
+    runId:node("span",undefined,"cell-sub"),badge:node("span"),totals:node("td",undefined,"mono"),
+    requests:node("td",undefined,"mono"),button:node("button","查看结果")};
+  const identity=node("td",undefined,"mono"),time=node("td"),status=node("td"),action=node("td");
+  identity.append(view.name,view.version);time.append(view.date,view.runId);status.append(view.badge);action.append(view.button);
+  view.row.append(identity,time,status,view.totals,view.requests,action);
+  view.button.addEventListener("click",()=>guarded(view.button,()=>viewRun(view.run)));
+  return view;
+}
 async function refreshHistory(){
-  const runs=await(await api("/api/runs")).json();$("history-count").textContent=runs.length;$("history-rows").replaceChildren();$("history-empty").hidden=!!runs.length;
+  const runs=await(await api("/api/runs")).json();updateText($("history-count"),runs.length);$("history-empty").hidden=!!runs.length;
+  const rows=[],paths=new Set();
   for(const run of runs){
-    const tr=node("tr"),identity=node("td",run.name,"mono");identity.append(node("span",run.version,"cell-sub"));
-    const time=node("td",new Date(run.started_at).toLocaleString("zh-CN"));time.append(node("span",run.run_id,"cell-sub"));
-    const status=node("td");status.append(node("span",run.status==="complete"?"已完成":"待补跑",`badge ${run.status==="complete"?"green":"amber"}`));
-    const action=node("td"),button=node("button","查看结果");button.addEventListener("click",()=>guarded(button,()=>viewRun(run)));action.append(button);
-    tr.append(identity,time,status,node("td",`${run.totals.successful_cases} / ${run.totals.planned_cases}`,"mono"),node("td",String(run.totals.requests),"mono"),action);$("history-rows").append(tr);
+    paths.add(run.path);
+    if(!historyViews.has(run.path))historyViews.set(run.path,createHistoryView());
+    const view=historyViews.get(run.path);view.run=run;rows.push(view.row);
+    updateText(view.name,run.name);updateText(view.version,run.version);
+    updateText(view.date,new Date(run.started_at).toLocaleString("zh-CN"));updateText(view.runId,run.run_id);
+    updateText(view.badge,run.status==="complete"?"已完成":"待补跑");view.badge.className=`badge ${run.status==="complete"?"green":"amber"}`;
+    updateText(view.totals,`${run.totals.successful_cases} / ${run.totals.planned_cases}`);updateText(view.requests,run.totals.requests);
   }
+  for(const path of historyViews.keys())if(!paths.has(path))historyViews.delete(path);
+  reconcileRows($("history-rows"),rows);
 }
 $("refresh-history").addEventListener("click",()=>guarded($("refresh-history"),async()=>{await refreshHistory();await poll();}));
 function artifactPath(path,file){return `/api/artifact/${path.split("/").map(encodeURIComponent).join("/")}/${file}`;}
