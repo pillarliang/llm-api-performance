@@ -278,9 +278,10 @@ async def request(client, prompt, record, event=lambda *a, **k: None):
 
 
 class BenchmarkRun:
-    def __init__(self, config, config_dir, output, prepared=None, client_factory=None):
+    def __init__(self, config, config_dir, output, prepared=None, client_factory=None, credentials=None):
         if client_factory is None and openai is None:
             raise RuntimeError("缺少依赖，请先运行 uv sync")
+        self.credentials = dict(credentials) if credentials is not None else None
         self.config = config
         self.config_dir = Path(config_dir)
         self.output = Path(output)
@@ -331,9 +332,12 @@ class BenchmarkRun:
             for _ in range(min(group["concurrency"], len(jobs))):
                 workers.create_task(worker())
 
+    def api_key(self, name):
+        return self.credentials.get(name) if self.credentials is not None else os.environ.get(name)
+
     async def run_model(self, entries, jobs):
         model = entries[0][0]
-        async with self.client_factory(api_key=os.environ.get(model["api_key_env"], "test"), base_url=model["base_url"],
+        async with self.client_factory(api_key=self.api_key(model["api_key_env"]), base_url=model["base_url"],
                                        timeout=self.config["timeout_seconds"], max_retries=0) as client:
             for _, prompt, group in entries:
                 await self.run_group(client, prompt, group, jobs[group["group_id"]])
@@ -366,7 +370,7 @@ class BenchmarkRun:
             for entry in self.prepared:
                 model, _, group = entry
                 if jobs[group["group_id"]]:
-                    if not os.environ.get(model["api_key_env"]):
+                    if not self.api_key(model["api_key_env"]):
                         raise ValueError(f'缺少密钥环境变量：{model["api_key_env"]}')
                     buckets[model["id"]].append(entry)
             self.skipped = len(self.prepared) * self.config["repetitions"] - sum(map(len, jobs.values()))

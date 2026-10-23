@@ -12,6 +12,7 @@ import yaml
 
 from benchmark import BenchmarkRun, plan, read_records, validate_config
 from catalog import CatalogError, ModelCatalog
+from connections import default_connection, normalize_base, resolve_connection
 from report import build_report
 
 ROOT = Path(__file__).resolve().parent
@@ -49,18 +50,55 @@ async def health():
     return {"status": "ok", "service": "llm-performance"}
 
 
-@app.get("/api/models")
-async def available_models(refresh: bool = False):
-    base_url = os.environ.get("DASHSCOPE_BASE_URL")
-    if not base_url:
-        base_url = next((model["base_url"] for model in current_config()["models"]
-                         if model["api_key_env"] == "DASHSCOPE_API_KEY"), None)
-    if not base_url:
-        raise HTTPException(503, "尚未配置 DASHSCOPE_BASE_URL")
+def default_base():
+    return yaml.safe_load(DEFAULT.read_text(encoding="utf-8"))["models"][0]["base_url"]
+
+
+@app.middleware("http")
+async def private_responses(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/") or request.url.path == "/":
+        response.headers["Cache-Control"] = "no-store"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
+async def connection_models(connection, refresh=False):
     try:
-        return await model_catalog.get(base_url, os.environ.get("DASHSCOPE_API_KEY"), refresh=refresh)
+        base, _, key = resolve_connection(connection, default_base())
+        # Custom credentials and model lists remain request-local, never in shared disk caches.
+        service = ModelCatalog(None) if connection.get("mode") == "custom" else model_catalog
+        return await service.get(base, key, refresh=refresh)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except CatalogError as exc:
         raise HTTPException(502, str(exc)) from exc
+
+
+@app.get("/api/models")
+async def available_models(refresh: bool = False):
+    return await connection_models({"mode": "default"}, refresh)
+
+
+@app.post("/api/models")
+async def custom_models(request: Request):
+    data = await payload(request)
+    return await connection_models(data.get("connection", {}), bool(data.get("refresh")))
+
+
+def bind_connection(config, data, require_key=False):
+    try:
+        connection = data.get("connection", {"mode": "default"})
+        base, name, key = resolve_connection(connection, default_base(), require_key=require_key)
+        for model in config["models"]:
+            # Legacy callers may omit connection, but may not redirect a server-owned key.
+            if "connection" not in data and normalize_base(model["base_url"]) != base:
+                raise ValueError("自定义端点需要提供独立的连接配置和 API Key")
+            model.pop("base_url_env", None)
+            model.update(base_url=base, api_key_env=name)
+        return {name: key}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def current_config():
@@ -104,7 +142,9 @@ def parse_config(data):
 @app.get("/api/config")
 async def get_config():
     config = current_config()
-    return {"config": config, "yaml": yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
+    base, _, key = default_connection(default_base())
+    return {"connection": {"mode": "default", "base_url": base, "configured": bool(key)},
+            "config": config, "yaml": yaml.safe_dump(config, allow_unicode=True, sort_keys=False),
             "credentials": [{"name": name, "configured": bool(os.environ.get(name))} for name in sorted({m["api_key_env"] for m in config["models"]})]}
 
 
@@ -116,7 +156,9 @@ async def validate_editor(request: Request):
 
 @app.put("/api/config")
 async def save_config(request: Request):
-    config = parse_config(await payload(request))
+    data = await payload(request)
+    config = parse_config(data)
+    bind_connection(config, data, require_key=True)
     async with run_guard:
         if active_task and not active_task.done():
             raise HTTPException(409, "评测运行中，结束或停止后再保存配置")
@@ -131,6 +173,7 @@ async def save_config(request: Request):
 async def get_plan(request: Request):
     data = await payload(request)
     config = parse_config(data)
+    bind_connection(config, data, require_key=True)
     try:
         description, prepared, _ = await asyncio.to_thread(plan, config, ROOT, RESULTS, data.get("mode", "incremental"))
     except (ValueError, OSError) as exc:
@@ -150,6 +193,8 @@ async def execute(run):
         # Do not return SDK exception strings that may contain HTTP credentials.
         active_state.update(status="error", error="执行失败，请检查结果日志、端点参数及服务配置")
     finally:
+        if run.credentials is not None:
+            run.credentials.clear()
         source = run.output / "results.json"
         if source.exists():
             try:
@@ -163,6 +208,7 @@ async def start_run(request: Request):
     global active_task, active_state
     data = await payload(request)
     config = parse_config(data)
+    credentials = bind_connection(config, data, require_key=True)
     async with run_guard:
         if active_task and not active_task.done():
             raise HTTPException(409, "已有评测正在运行")
@@ -171,12 +217,12 @@ async def start_run(request: Request):
             records = read_records(output / "requests.jsonl")
             from benchmark import plan_jobs
             jobs = plan_jobs(prepared, records, config["repetitions"])
-            missing = {m["api_key_env"] for m, _, g in prepared if jobs[g["group_id"]] and not os.environ.get(m["api_key_env"])}
+            missing = {m["api_key_env"] for m, _, g in prepared if jobs[g["group_id"]] and not credentials.get(m["api_key_env"])}
             if missing:
                 raise ValueError("缺少环境变量：" + ", ".join(sorted(missing)))
             if (output / ".run.lock").exists():
                 raise ValueError("该 run 已锁定，请检查是否正在通过命令行执行")
-            run = BenchmarkRun(config, ROOT, output, prepared)
+            run = BenchmarkRun(config, ROOT, output, prepared, credentials=credentials)
         except (ValueError, OSError) as exc:
             raise HTTPException(400, str(exc)) from exc
         active_state = dict(status="starting", path=str(output.relative_to(RESULTS)), session_id=run.session_id, plan=description)

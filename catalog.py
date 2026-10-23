@@ -15,7 +15,7 @@ class CatalogError(Exception):
 
 class ModelCatalog:
     def __init__(self, cache_file, client_factory=None, ttl=300):
-        self.cache_file = Path(cache_file)
+        self.cache_file = Path(cache_file) if cache_file is not None else None
         self.client_factory = client_factory or openai.AsyncOpenAI
         self.ttl = ttl
         self.lock = asyncio.Lock()
@@ -28,7 +28,7 @@ class ModelCatalog:
         identity = hashlib.sha256((base_url + "\0" + api_key).encode()).hexdigest()
         requested_at = time.time()
         async with self.lock:
-            if self.cache is None and self.cache_file.exists():
+            if self.cache is None and self.cache_file and self.cache_file.exists():
                 try:
                     self.cache = json.loads(self.cache_file.read_text(encoding="utf-8"))
                     if not isinstance(self.cache, dict) or not {"identity", "timestamp", "data"}.issubset(self.cache):
@@ -60,10 +60,11 @@ class ModelCatalog:
                 data = {"base_url": base_url, "fetched_at": datetime.now(timezone.utc).isoformat(),
                         "count": len(models), "models": sorted(models.values(), key=lambda model: model["id"].casefold())}
                 updated = {"identity": identity, "timestamp": time.time(), "data": data}
-                self.cache_file.parent.mkdir(parents=True, exist_ok=True)
-                temporary = self.cache_file.with_suffix(".tmp")
-                temporary.write_text(json.dumps(updated, ensure_ascii=False), encoding="utf-8")
-                temporary.replace(self.cache_file)
+                if self.cache_file:
+                    self.cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = self.cache_file.with_suffix(".tmp")
+                    temporary.write_text(json.dumps(updated, ensure_ascii=False), encoding="utf-8")
+                    temporary.replace(self.cache_file)
                 self.cache = updated
                 return dict(data, stale=False)
             except (openai.APIError, TimeoutError, OSError, ValueError, CatalogError) as exc:

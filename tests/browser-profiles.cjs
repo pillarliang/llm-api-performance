@@ -1,0 +1,27 @@
+const {chromium}=require('playwright');const assert=require('node:assert/strict');
+(async()=>{
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox']});const page=await browser.newPage({viewport:{width:1440,height:1050}});
+ const errors=[];page.on('pageerror',e=>errors.push(e.message));const origin=process.env.PREVIEW_ORIGIN||'http://127.0.0.1:18002';let initial=true;
+ await page.route('**/api/config',async route=>{if(route.request().method()==='GET'&&initial){initial=false;const response=await route.fetch();const data=await response.json();delete data.config.ui_version;await route.fulfill({response,json:data});}else await route.continue();});
+ await page.route('**/api/models',async route=>route.fulfill({json:{base_url:'https://sg.test/v1',count:2,stale:false,fetched_at:new Date().toISOString(),models:[{id:'test-model',owned_by:'Test'},{id:'other-model',owned_by:'Test'}]}}));
+ await page.goto(origin);await page.getByRole('checkbox',{name:'选择 test-model',exact:true}).check();
+ let row=page.locator('#model-list .model-row').first();let picker=row.locator('.effort-picker');
+ const pickerBox=await picker.boundingBox(),buttonBox=await row.getByRole('button',{name:'自定义请求参数',exact:true}).boundingBox();assert.ok(Math.abs(pickerBox.y-buttonBox.y)<3,'Actions must share one line');assert.equal(await row.locator('.parameter-panel').isVisible(),false);
+ await picker.locator('summary').click();await page.getByRole('checkbox',{name:'test-model low · 低',exact:true}).check();await page.getByRole('checkbox',{name:'test-model medium · 中',exact:true}).check();await page.getByRole('checkbox',{name:'test-model high · 高',exact:true}).check();await page.getByRole('checkbox',{name:'test-model 服务默认',exact:true}).uncheck();
+ assert.match(await picker.locator('summary').textContent(),/3 档/);
+ await row.getByRole('button',{name:'自定义请求参数',exact:true}).click();assert.equal(await picker.getAttribute('open'),null);assert.equal(await row.locator('.parameter-panel').isVisible(),true);
+ await row.locator('select').selectOption('high');await row.locator('textarea').fill('{"reasoning_effort":"high","thinking":{"type":"enabled"}}');
+ await row.locator('select').selectOption('low');assert.deepEqual(JSON.parse(await row.locator('textarea').inputValue()),{reasoning_effort:'low'});
+ const planPromise=page.waitForResponse(r=>r.url().endsWith('/api/plan'));await page.locator('#check-plan').click();const plan=await(await planPromise).json();
+ assert.equal(plan.groups,3);assert.equal(plan.pending_calls,9);assert.deepEqual(plan.groups_detail.map(g=>g.profile),['low','medium','high']);assert.deepEqual(plan.groups_detail.find(g=>g.profile==='high').parameters,{reasoning_effort:'high',thinking:{type:'enabled'}});assert.deepEqual(plan.groups_detail.find(g=>g.profile==='low').parameters,{reasoning_effort:'low'});
+ await picker.locator('summary').click();await page.getByRole('checkbox',{name:'test-model medium · 中',exact:true}).uncheck();assert.equal(await page.locator('#start-run').isDisabled(),true);
+ await page.getByRole('checkbox',{name:'test-model low · 低',exact:true}).uncheck();await page.getByRole('checkbox',{name:'test-model high · 高',exact:true}).click();assert.equal(await page.getByRole('checkbox',{name:'test-model high · 高',exact:true}).isChecked(),true);
+ await page.getByRole('checkbox',{name:'test-model low · 低',exact:true}).check();await picker.locator('summary').press('Escape');
+ await row.locator('select').selectOption('low');await row.locator('textarea').fill('{bad');assert.equal(await page.locator('#check-plan').isDisabled(),true);
+ await page.getByRole('checkbox',{name:'选择 other-model',exact:true}).check();row=page.locator('#model-list .model-row').first();assert.equal(await row.locator('textarea').inputValue(),'{bad');assert.equal(await page.locator('#check-plan').isDisabled(),true);
+ await row.locator('textarea').fill('{"reasoning_effort":"low"}');assert.equal(await page.locator('#check-plan').isDisabled(),false);
+ await page.locator('#save-config').click();await page.getByText('配置已保存',{exact:true}).waitFor();await page.reload();await page.locator('#model-list .model-row').first().waitFor();row=page.locator('#model-list .model-row').first();
+ assert.match(await row.locator('.effort-picker summary').textContent(),/high \+ low/);await row.getByRole('button',{name:'自定义请求参数',exact:true}).click();await row.locator('select').selectOption('high');assert.deepEqual(JSON.parse(await row.locator('textarea').inputValue()),{reasoning_effort:'high',thinking:{type:'enabled'}});
+ await row.getByRole('button',{name:'自定义请求参数',exact:true}).click();await page.screenshot({path:'/work/.qa/efforts-desktop.png',fullPage:true});await row.locator('.effort-picker summary').click();await page.screenshot({path:'/work/.qa/efforts-dropdown.png',fullPage:true});await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));await page.screenshot({path:'/work/.qa/efforts-mobile.png',fullPage:true});
+ assert.deepEqual(errors,[]);await browser.close();console.log('PASS: inline actions, multiple profiles, separate groups and parameters, independent editor, minimum one profile, plan invalidation, invalid JSON retained after rerender, save/reload, desktop/mobile.');
+})().catch(e=>{console.error(e);process.exit(1)});

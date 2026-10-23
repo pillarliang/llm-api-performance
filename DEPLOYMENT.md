@@ -15,7 +15,7 @@ bash deploy/start.sh
 
 脚本在标准 `python:3.12-slim` 容器中按照 `requirements.lock` 准备 `.runtime`，然后启动 `llm-performance-worker-1`，轮询 `http://127.0.0.1:8001/healthz`，通过后输出访问地址。远程访问使用 `http://服务器地址:8001`。重复执行会先平滑停止旧 worker，再以原有结果目录重建。容器使用 `unless-stopped` 自动重启策略，运行一个 Uvicorn worker；源码挂载为只读，`results/` 和 `state/` 可写。
 
-工作台无需登录口令，直接访问页面即可使用。模型密钥从环境变量传入，不写入源码、浏览器或评测结果。
+工作台无需登录口令，直接访问页面即可使用。默认 SG 密钥从环境变量传入，不下发浏览器。网页也支持填写自定义 Key 和 Base URL；自定义 Key 仅随本轮请求使用，不写入配置或评测结果，刷新页面需重新输入。
 
 ```bash
 docker logs --tail=100 llm-performance-worker-1  # 运行日志
@@ -25,7 +25,7 @@ docker stop --time 30 llm-performance-worker-1   # 停止并保存已开始请�
 
 日常查看日志、停止服务不需要重新提供密钥。再次部署时需要 `DASHSCOPE_API_KEY` 环境变量。模型 Key 只通过 Docker 环境变量传递，没有保存到源文件中。
 
-容器配置保存到宿主机 `state/config.local.yaml`，结果保存到 `results/`；重建容器保留这两个目录。网页「保存配置」只保存非密钥配置。修改 YAML 的任务文件路径时，应相对于项目根目录，并限定在 `prompts/` 中。新增模型可在 YAML 中填写独立 `base_url` 和 `api_key_env`，对应密钥还需通过 `docker run -e 变量名` 传入。
+容器配置保存到宿主机 `state/config.local.yaml`，结果保存到 `results/`；重建容器保留这两个目录。网页「保存配置」只保存非密钥配置。修改 YAML 的任务文件路径时，应相对于项目根目录，并限定在 `prompts/` 中。网页直接从当前连接的接口列表选择模型，也可填写 Model Name；当前连接对网页选择的所有模型生效。命令行仍可在 YAML 中填写独立 `base_url` 和 `api_key_env`，对应密钥需通过环境变量传入。网页已移除 YAML 编辑器。
 
 另保留 `Dockerfile` 和 `compose.yaml` 供镜像构建部署；使用该方案前先停止单独启动的 worker，避免争用 8001。执行 `docker compose up -d --build`。两种部署方式使用相同的持久化目录。
 
@@ -33,9 +33,9 @@ docker stop --time 30 llm-performance-worker-1   # 停止并保存已开始请�
 
 ## 模型目录与重点配置
 
-网页「模型目录」读取当前端点 `/models` 的全部分页结果，支持搜索、归属方筛选、GLM-5.3 / GLM-5.2 / Qwen3.8 筛选、下载完整 JSON 和加入实验。列表缓存 5 分钟，可手动刷新；上游失败时明确显示旧缓存。2026-10-14 实测该端点返回 **99 个模型**，列表可见不代表每个模型都支持文本 Chat Completions。
+网页「实验配置 → 选择模型」读取当前端点 `/models` 的全部分页结果，支持搜索、多选、手动添加 Model Name 和刷新。独立的模型目录 Tab 已移除。列表缓存 5 分钟，可手动刷新；上游失败时明确显示旧缓存。2026-10-14 实测该端点返回 **99 个模型**，列表可见不代表每个模型都支持文本 Chat Completions。
 
-默认配置为 `config.focus.example.yaml`，启用 `glm-5.3`、`glm-5.2`、`qwen3.8-max`，保留 `qwen3.8-flash` 可选。`glm5.2` 在端点中的实际 ID 是 `glm-5.2`。旧保存配置已备份至 `state/config.before-model-catalog.yaml`；网页保存的配置优先于示例文件。
+命令行重点示例 `config.focus.example.yaml` 启用 `glm-5.3`、`glm-5.2`、`qwen3.8-max`，保留 `qwen3.8-flash` 可选。`glm5.2` 在端点中的实际 ID 是 `glm-5.2`。旧保存配置已备份至 `state/config.before-model-catalog.yaml`；新版网页首次不预选模型；新版网页保存的选择和设置可恢复，旧示例仍供 CLI 使用。
 
 GLM-5.3 和 GLM-5.2 按用户提供的档位配置 `low`（低）、`high`（高）、`max`（最大 / 默认），请求发送 `thinking: {type: enabled}` 和对应 `reasoning_effort`。旧配置备份在 `state/config.before-glm-effort.yaml`。Qwen3.8-Max 按用户提供的 `low`（低）、`medium`（中）、`xhigh`（超高 / 默认）三档配置，请求发送 `enable_thinking: true` 和对应 `reasoning_effort`；旧配置备份在 `state/config.before-qwen-effort.yaml`。
 

@@ -72,7 +72,7 @@ class ServerTests(unittest.TestCase):
         config = self.client.get("/api/config", headers=self.headers).json()["config"]
         response = self.client.post("/api/plan", headers=self.headers, json={"config": config, "mode": "full"})
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["planned_cases"], 72)
+        self.assertEqual(response.json()["planned_cases"], 54)  # Current focus preset: 18 groups × 3 repeats.
         self.assertFalse(self.results.exists())
         self.assertEqual(self.client.get("/api/artifact/%2e%2e/README.md", headers=self.headers).status_code, 404)
         directory = self.results / "test/v1/runs/example"
