@@ -83,19 +83,33 @@ async def lifespan(app):
             run_registry[state["job_id"]] = dict(state=state, task=None, run=None)
         except (OSError, ValueError, KeyError, TypeError):
             continue
+    try:
+        await media_web.recover_materials()
+    except Exception as exc:
+        media_web.v.log('media_cleanup_pending', error=media_web.v.safe_error(exc))
+    cleanup_task = asyncio.create_task(media_web.cleanup_loop())
     retry_task = asyncio.create_task(retry_archives()) if store.remote else None
     yield
+    await media_web.shutdown()
     tasks = [entry["task"] for entry in run_registry.values() if entry["task"] and not entry["task"].done()]
     for entry in run_registry.values():
         if entry["task"] and not entry["task"].done() and entry["state"]["status"] in {"starting", "running"}:
             entry["task"].cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    for entry in run_registry.values():
+        run = entry.get('run')
+        if run is not None:
+            await media_web.finish_run(run.config, run.session_id)
+    cleanup_task.cancel()
+    await asyncio.gather(cleanup_task, return_exceptions=True)
     if retry_task:
         retry_task.cancel()
         await asyncio.gather(retry_task, return_exceptions=True)
 
 
 app = FastAPI(title="Model Studio · LLM 性能评测", lifespan=lifespan, docs_url=None, redoc_url=None)
+import media_web
+app.include_router(media_web.router)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -187,7 +201,10 @@ def current_config():
 
 
 def checked_config(content):
-    config = validate_config(yaml.safe_load(content), allow_empty_models=True)
+    raw = yaml.safe_load(content)
+    if isinstance(raw, dict) and ({"visual_cases", "media_owner"} & raw.keys()):
+        raise ValueError("视觉样本由服务端解析，请通过素材选择提交")
+    config = validate_config(raw, allow_empty_models=True)
     # Browser configuration can only read bundled task assets.
     for task in config["tasks"]:
         for field in ("template_file", "corpus_file"):
@@ -255,11 +272,23 @@ async def save_config(request: Request):
 async def get_plan(request: Request):
     data = await payload(request)
     config, _ = parse_config(data, require_key=True)
+    config = await media_web.resolve_selection(request, data, config)
     try:
         description, prepared, _ = await asyncio.to_thread(plan, config, ROOT, RESULTS, data.get("mode", "incremental"))
     except (ValueError, OSError) as exc:
         raise HTTPException(400, str(exc)) from exc
     return dict(description, groups_detail=[g for _, _, g in prepared])
+
+
+def request_owner(request):
+    try:
+        return media_web.owner(request)
+    except HTTPException:
+        return None
+
+
+def can_view(request, state):
+    return state.get('media_owner') in (None, request_owner(request))
 
 
 def job_snapshot(entry):
@@ -296,6 +325,13 @@ async def archive_job(entry, output):
 
 
 async def execute(run, entry):
+    try:
+        await execute_body(run, entry)
+    finally:
+        await media_web.finish_run(run.config, run.session_id)
+
+
+async def execute_body(run, entry):
     state = entry["state"]
     state["status"] = "running"
     try:
@@ -327,9 +363,15 @@ async def start_run(request: Request):
     global active_task, active_state
     data = await payload(request)
     config, credentials = parse_config(data, require_key=True)
+    config = await media_web.resolve_selection(request, data, config)
     async with run_guard:
         try:
             description, prepared, output = await asyncio.to_thread(plan, config, ROOT, RESULTS, data.get("mode", "full"))
+            prior_summary = output / 'results.json'
+            if prior_summary.exists():
+                prior_owner = json.loads(prior_summary.read_text()).get('settings', {}).get('media_owner')
+                if prior_owner != config.get('media_owner'):
+                    raise ValueError('最近运行属于其他素材空间，请使用新建运行')
             records = read_records(output / "requests.jsonl")
             from benchmark import plan_jobs
             jobs = plan_jobs(prepared, records, config["repetitions"])
@@ -344,15 +386,25 @@ async def start_run(request: Request):
             raise HTTPException(400, str(exc)) from exc
         active_state = dict(job_id=run.session_id, status="starting", name=config["name"], version=config["version"],
                             started_at=now(), path=str(output.relative_to(RESULTS)), session_id=run.session_id, plan=description,
+                            media_owner=config.get("media_owner"),
                             targets=[dict(provider=m.get("provider_name", m["id"]), model=m["model"]) for m in config["models"] if m.get("enabled", True)],
                             input_tokens=config["input_tokens"], concurrencies=config["concurrencies"])
         entry = dict(state=active_state, task=None, run=run)
-        persist_job(entry)
-        store = get_store(RESULTS)
+        try:
+            await media_web.lifecycle().acquire(config, run.session_id)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        try:
+            persist_job(entry)
+            store = get_store(RESULTS)
+        except Exception:
+            await media_web.lifecycle().abandon(run.session_id)
+            raise
         if store.remote:
             try:
                 await asyncio.to_thread(store.put, ".jobs/" + run.session_id + ".json", encoded(job_snapshot(entry)))
             except StorageError:
+                await media_web.lifecycle().abandon(run.session_id)
                 credentials.clear()
                 run.credentials.clear()
                 (RESULTS / ".jobs" / (run.session_id + ".json")).unlink(missing_ok=True)
@@ -368,6 +420,8 @@ async def stop_entry(entry):
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         if entry["state"]["status"] in {"starting", "running"}:
+            if entry['run'] is not None:
+                await media_web.finish_run(entry['run'].config, entry['run'].session_id)
             entry["state"]["status"] = "cancelled"
             if entry["run"] and entry["run"].credentials is not None:
                 entry["run"].credentials.clear()
@@ -379,37 +433,41 @@ async def stop_entry(entry):
 
 
 @app.post("/api/jobs/{job_id}/stop")
-async def stop_job(job_id: str):
-    if job_id not in run_registry:
+async def stop_job(job_id: str, request: Request):
+    if job_id not in run_registry or not can_view(request, run_registry[job_id]["state"]):
         raise HTTPException(404, "任务不存在")
     return await stop_entry(run_registry[job_id])
 
 
 @app.post("/api/stop")
-async def stop():
+async def stop(request: Request):
+    if active_state and not can_view(request, active_state):
+        raise HTTPException(404, "任务不存在")
     if active_state and active_state.get("job_id") in run_registry:
         return await stop_entry(run_registry[active_state["job_id"]])
     return {"stopped": True}
 
 
 @app.get("/api/jobs")
-async def list_jobs():
-    return [job_snapshot(entry) for entry in reversed(list(run_registry.values()))]
+async def list_jobs(request: Request):
+    return [job_snapshot(entry) for entry in reversed(list(run_registry.values())) if can_view(request, entry["state"])]
 
 
 @app.get("/api/status")
-async def status():
+async def status(request: Request):
+    if active_state and not can_view(request, active_state):
+        return {"status": "idle"}
     if active_state and active_state.get("job_id") in run_registry:
         return job_snapshot(run_registry[active_state["job_id"]])
     return dict(active_state) if active_state else {"status": "idle"}
 
 
 @app.get("/api/runs")
-async def list_runs():
-    return await asyncio.to_thread(read_runs)
+async def list_runs(request: Request):
+    return await asyncio.to_thread(read_runs, request_owner(request))
 
 
-def read_runs():
+def read_runs(viewer=None):
     store = get_store(RESULTS)
     items = []
     for key in store.keys():
@@ -418,6 +476,8 @@ def read_runs():
             continue
         try:
             data = json.loads(store.read(key))
+            if data.get('settings', {}).get('media_owner') not in (None, viewer):
+                continue
             items.append(dict(path=str(path.parent), name=data["settings"]["name"],
                               version=data["settings"]["version"], run_id=path.parent.name,
                               started_at=data["started_at"], status=data["status"], totals=data["totals"], data_source=data["data_source"]))
@@ -427,7 +487,7 @@ def read_runs():
 
 
 @app.get("/api/artifact/{artifact_path:path}")
-async def artifact(artifact_path: str):
+async def artifact(artifact_path: str, request: Request):
     try:
         valid_key(artifact_path)
     except ValueError:
@@ -435,6 +495,14 @@ async def artifact(artifact_path: str):
     if Path(artifact_path).name not in ARTIFACTS:
         raise HTTPException(404, "结果文件不存在")
     store = get_store(RESULTS)
+    directory = str(Path(artifact_path).parent)
+    known = next((e['state'].get('media_owner') for e in run_registry.values() if e['state']['path'] == directory), None)
+    if known is None:
+        summary = await asyncio.to_thread(store.read, directory + '/results.json')
+        if summary:
+            known = json.loads(summary).get('settings', {}).get('media_owner')
+    if known is not None and known != request_owner(request):
+        raise HTTPException(404, '结果文件不存在')
     if store.remote:
         data = await asyncio.to_thread(store.read, artifact_path)
         if data is None:

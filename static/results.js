@@ -12,7 +12,8 @@ window.renderReport = function renderReport(root, data) {
     if(group.provider_name)return group.provider_name;
     try{return new URL(group.base_url).host;}catch{return group.endpoint_id||"历史来源";}
   };
-  const groups = (data.summary || []).map(group=>({...group,provider_id:group.provider_id||group.base_url||group.endpoint_id||"legacy",provider_name:sourceName(group)}));
+  const groups = (data.summary || []).map(group=>({...group,modality:group.modality||"text",provider_id:group.provider_id||group.base_url||group.endpoint_id||"legacy",provider_name:sourceName(group)}));
+  const textTokenLabel = groups.some(g=>g.modality!=="text") ? "提示词文本 Token" : "输入 Token";
   const modelLabel = group => `${group.provider_name} · ${group.model||group.endpoint_id}`;
   const settings = data.environment || data.settings || {};
   const modelKey = group => JSON.stringify([group.provider_id, group.endpoint_id ?? null, group.model ?? null]);
@@ -97,7 +98,7 @@ window.renderReport = function renderReport(root, data) {
   });
   allModels.addEventListener("click",()=>{models.forEach(m=>{m.enabled=true;});update();});
   noModels.addEventListener("click",()=>{models.forEach(m=>{m.enabled=false;});update();});
-  for(const [key,title] of [["provider_id","来源"],["model","模型"],["task","任务"],["target_input_tokens","输入 Token"],["concurrency","并发"]]) {
+  for(const [key,title] of [["provider_id","来源"],["modality","输入类型"],["model","模型"],["task","任务"],["target_input_tokens","输入 Token"],["concurrency","并发"]]) {
     const label=el("label",title,"report-filter");const select=el("select");
     select.setAttribute("aria-label",`筛选${title}`);select.append(new Option("全部",""));
     [...new Set(groups.map(g=>String(g[key])))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true})).forEach(value=>select.append(new Option(key==="provider_id"?groups.find(g=>g.provider_id===value).provider_name:value==="null"?"未分档":value,value)));
@@ -113,7 +114,7 @@ window.renderReport = function renderReport(root, data) {
   scroll.setAttribute("role","region");scroll.setAttribute("aria-label","性能指标表，可横向滚动");
   const table=el("table"),thead=el("thead"),head=el("tr"),body=el("tbody");
   const metrics=[["ttft_ms","TTFT / ms"],["ttfa_seconds","TTFA / s"],["output_speed_tps","答案速度 / tok/s"],["e2e_seconds","E2E / s"],["max_answer_gap_seconds","最大间隔 / s"]];
-  const columns=[["provider_name","来源"],["model","模型 / 推理强度"],["task","任务"],["benchmark_input_tokens","输入 Token"],["concurrency","并发"],["success_rate","成功率"],...metrics];
+  const columns=[["provider_name","来源"],["model","模型 / 推理强度"],["task","任务"],["benchmark_input_tokens",textTokenLabel],["concurrency","并发"],["success_rate","成功率"],...metrics];
   let sortKey="model",direction=1,visible=[];
   const sortHeaders=[];
   columns.forEach(([key,name])=>{

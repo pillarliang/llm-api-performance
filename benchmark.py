@@ -154,6 +154,22 @@ def make_group(config, task, model, profile, prompt, target, concurrency):
 
 def prepare(config, config_dir):
     prepared = []
+    if config.get('visual_cases'):
+        for case in config['visual_cases']:
+            for concurrency in config['concurrencies']:
+                for model in config['models']:
+                    if model.get('enabled', True):
+                        for profile in model['profiles']:
+                            group = make_group(config, {'id': case['group']}, model, profile, case['prompt'], None, concurrency)
+                            group.update(modality=case['modality'], media_case=case)
+                            if '·' not in case['group']:
+                                a = case['objects'][0]
+                                group['task'] += f" · {a['width']}×{a['height']} · {case.get('duration_seconds', '')}s · {case.get('submitted_frame_count') or case.get('image_count', 1)}项 · {case['case_id'][:6]}"
+                            group['group_id'] = hashlib.sha256(json.dumps(group, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+                            prepared.append((model, case['prompt'], group))
+        if not prepared:
+            raise ValueError('没有可执行的视觉评测组合')
+        return prepared
     for task in config["tasks"]:
         for target in config["input_tokens"]:
             prompt = make_prompt(task, target, config_dir)
@@ -252,11 +268,20 @@ def accept_chunk(record, chunk, elapsed, event):
 
 async def request(client, prompt, record, event=lambda *a, **k: None):
     event("request_started", case_id=record["case_id"], phase=record["phase"], group_id=record["group_id"])
+    # Sign URLs before timing; signatures are never written to records or group identity.
+    content = prompt
+    if record.get('media_case'):
+        from media_web import model_content
+        try:
+            content = await asyncio.to_thread(model_content, record['media_case'], record['timeout_seconds'])
+        except Exception:
+            record['error_type'] = 'media_preparation_error'
+            return record
     start = time.perf_counter()
     stream = None
     try:
         async with asyncio.timeout(record["timeout_seconds"]):
-            kwargs = dict(model=record["model"], messages=[dict(role="user", content=prompt)],
+            kwargs = dict(model=record["model"], messages=[dict(role="user", content=content)],
                           stream=True, extra_body=record["parameters"])
             if record["include_usage"]:
                 kwargs["stream_options"] = {"include_usage": True}

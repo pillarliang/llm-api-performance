@@ -1,5 +1,11 @@
 # LLM API 性能评测（performance-v2）
 
+## 视觉素材上传与评测（2026-10-23）
+
+工作台「评测条件 → 输入类型」支持文本、个人图片/视频和默认视觉数据集。上传后根据原件动态展示可用分辨率、视频时长和抽帧档位，用户选择后后台生成并保存：个人素材仅存服务器本地，默认数据集存私有OSS；素材就绪后沿用来源、模型、推理档、并发和重复次数发起视觉评测。默认数据集长期复用；个人素材在评测结束后自动清理（并发任务共用时等待最后一个任务结束），预处理耗时不计入API指标。个人素材及其评测结果按浏览器Cookie空间限制访问；默认数据集等待统一素材准备。
+
+使用方法、目录与限制见 [VISUAL_PREPROCESSING.md](VISUAL_PREPROCESSING.md)，默认素材要求见 [VISUAL_DATASET_REQUIREMENTS.md](VISUAL_DATASET_REQUIREMENTS.md)。下文早期文本设计背景中的多模态边界已由此功能扩展。完整检查范围与已修复问题见 [VISUAL_FLOW_AUDIT.md](VISUAL_FLOW_AUDIT.md)。
+
 ## OSS 结果存储（2026-10-23）
 
 线上评测结果使用北京地域的私有桶 `llm-performance-eval`，对象前缀为 `results/`。结果列表、JSON/JSONL、HTML 报告和增量续跑读取 OSS；任务历史也从 OSS 恢复。原有本地测试记录已清空。

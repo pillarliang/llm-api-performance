@@ -1,0 +1,43 @@
+// Isolated preview only: requires the synthetic /mock/v1/chat/completions endpoint and /qa fixtures.
+const {chromium}=require('/browser/node_modules/playwright');
+const assert=require('node:assert/strict');
+const origin=process.env.PREVIEW_ORIGIN||'http://127.0.0.1:18009';
+(async()=>{
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+ const page=await browser.newPage({viewport:{width:1440,height:1000}});page.setDefaultTimeout(300000);const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.route('**/api/config',async r=>{const response=await r.fetch();const data=await response.json();data.connection.configured=true;await r.fulfill({response,json:data});});
+ await page.route('**/api/models',r=>r.fulfill({json:{models:[{id:'qwen3.8-max'}],count:1,stale:false}}));
+ await page.goto(origin);await page.waitForSelector('.model-option');await page.locator('.model-option input').first().check();
+ await page.selectOption('#input-modality','upload');await page.waitForFunction(()=>document.querySelector('#media-status').textContent.includes('个人素材'));
+ await page.setInputFiles('#media-files',{name:'invalid.jpg',mimeType:'image/jpeg',buffer:Buffer.from('not a valid image')});await page.click('#upload-media');
+ await page.waitForFunction(()=>!document.querySelector('#upload-media').disabled);assert((await page.locator('#media-status').innerText()).includes('UnidentifiedImageError'));
+ await page.setInputFiles('#media-files',['/qa/image-0.jpg','/qa/video.mp4']);await page.click('#upload-media');
+ await page.waitForFunction(()=>document.querySelectorAll('#media-assets fieldset').length===2,{timeout:90000});
+ const image=page.locator('#media-assets fieldset').filter({has:page.locator('legend',{hasText:'image-0.jpg'})});const video=page.locator('#media-assets fieldset').filter({has:page.locator('legend',{hasText:'video.mp4'})});
+ assert.equal(await image.locator('input').count(),2);assert.equal(await video.locator('input').count(),24);
+ await image.locator('input[value="image:512"]').check();await video.locator('input[value="video:10:360"]').check();
+ assert(await page.locator('#media-counts input[value="2"]').isDisabled());
+ await page.click('#prepare-media');assert(await image.locator('input[value="image:512"]').isDisabled());assert(await page.locator('#input-modality').isDisabled());assert(await page.locator('#start-run').isDisabled());
+ await page.waitForFunction(()=>document.querySelector('#media-status').textContent.includes('已就绪'),{timeout:180000});await page.waitForFunction(()=>!document.querySelector('#start-run').disabled);
+ let runId;
+ await page.route('**/api/runs',async route=>{
+  if(route.request().method()!=='POST')return route.continue();const data=route.request().postDataJSON();
+  data.config.name='browser-audit';data.config.repetitions=1;data.config.concurrencies=[1];data.config.max_retries=0;
+  data.config.providers=[{id:'audit-browser',name:'Mock',mode:'custom',base_url:'http://127.0.0.1:18009/mock/v1'}];
+  data.config.models.forEach(m=>{m.provider_id='audit-browser';m.id='audit-browser';m.base_url='http://127.0.0.1:18009/mock/v1';m.api_key_env='CUSTOM_API_KEY';});
+  data.connections=[{id:'audit-browser',api_key:'fast'}];
+  const response=await page.request.post(origin+'/api/runs',{data});assert.equal(response.status(),200,await response.text());runId=(await response.json()).job_id;
+  await route.fulfill({response});
+ });
+ await page.click('#start-run');await page.waitForFunction(()=>document.querySelector('#media-status').textContent.includes('已清理'),{timeout:30000});
+ assert.equal(await page.locator('#media-assets fieldset').count(),0);assert(await page.locator('#start-run').isDisabled());
+ const jobs=await(await page.request.get(origin+'/api/jobs')).json();const job=jobs.find(j=>j.job_id===runId);assert.equal(job.status,'finished');
+ const result=await(await page.request.get(origin+'/api/artifact/'+job.path+'/results.json')).json();assert.equal(result.totals.successful_cases,2);
+ await page.locator(`[data-job-id="${runId}"]`).getByRole('button',{name:'查看结果'}).click();
+ await page.waitForFunction(()=>document.querySelectorAll('#report tbody tr').length>0);
+ assert((await page.locator('#report').innerText()).includes('输入类型'));
+ assert((await page.locator('#report').innerText()).includes('提示词文本 Token'));
+ await page.screenshot({path:'/qa/browser-report-desktop.png',fullPage:true});
+await page.setViewportSize({width:390,height:844});await page.screenshot({path:'/qa/browser-mobile.png',fullPage:true});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));assert.deepEqual(errors,[]);
+ console.log('PASS: browser upload error retained, dynamic tiers, locked preparation controls, actual mock run, automatic cleaned state, report retained, mobile layout');await browser.close();
+})().catch(e=>{console.error(e);process.exit(1)});

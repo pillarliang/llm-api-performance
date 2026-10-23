@@ -31,6 +31,18 @@ docker run --rm --env-file "$PWD/state/oss.env" \
 
 本次验证覆盖上传/读取、清理本地后下载、全新本地目录启动后恢复任务，以及增量跳过已有成功项。之前的本地测试运行和任务记录已清空。
 
+## 视觉素材 OSS Bucket
+
+2026-10-23 已创建 `llm-performance-vision-datasets`，地域为 `cn-beijing`，公网 Endpoint 为 `https://oss-cn-beijing.aliyuncs.com`，权限为私有，存储类型为标准存储（LRS）。已验证读写、清理校验对象及目录列表。
+
+- 原始图片：`oss://llm-performance-vision-datasets/vision/v1/originals/images/`
+- 原始视频：`oss://llm-performance-vision-datasets/vision/v1/originals/videos/`
+- 预处理文件：`vision/v1/prepared/images/`、`vision/v1/prepared/videos/`、`vision/v1/prepared/frames/`
+- 数据清单：`vision/v1/manifests/`
+- 素材要求：见 [VISUAL_DATASET_REQUIREMENTS.md](VISUAL_DATASET_REQUIREMENTS.md)，建桶时的副本已上传至 `vision/v1/README.md`。
+
+此桶专门保存视觉评测素材。现有 `state/oss.env` 中的 `OSS_BUCKET=llm-performance-eval` 仍用于结果存储，不应改为素材桶。预处理脚本已支持扫描原件、生成档位、上传和增量续跑，使用方法见 [VISUAL_PREPROCESSING.md](VISUAL_PREPROCESSING.md)。工作台已支持上传、动态选择档位、后台生成和视觉模型请求。个人媒体仅暂存在 `state/media-web/datasets/`，评测结束后自动清理已用原件及全部生成档位，OSS素材桶仅保存默认数据集。个人素材与结果按浏览器Cookie空间限制访问；结果仍沿用原有存储后端。本地媒体通过临时签名链接供模型读取，必要时配置 `MEDIA_PUBLIC_BASE_URL` 为模型可访问的工作台地址。
+
 本仓库直接在根目录实现 README 描述的 `performance-v2`。Web 工作台沿用 Model Studio 简洁布局，保留白灰色调，使用卡片底色区分区域，并保留 1px 浅灰外框。服务端口固定为 **8001**，只启动 **1 个 Uvicorn worker**，由同一任务管理器调度多个独立后台评测，并协调同一运行目录的写锁。
 
 ## Docker 部署

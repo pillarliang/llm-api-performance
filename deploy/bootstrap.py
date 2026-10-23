@@ -15,7 +15,7 @@ env = {
     "TIKTOKEN_CACHE_DIR": str(root / ".token-cache"),
 }
 subprocess.run(
-    ["uv", "sync", "--locked", "--no-dev", "--no-install-project", "--python", sys.executable],
+    ["uv", "sync", "--locked", "--no-dev", "--group", "media", "--no-install-project", "--python", sys.executable],
     cwd=root, env=env, check=True,
 )
 python = str(runtime / "bin" / "python")

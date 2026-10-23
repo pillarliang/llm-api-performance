@@ -39,15 +39,16 @@ function syncButtons(){
   const locked=busy;
   if(locked)document.querySelectorAll(".effort-picker,.token-picker").forEach(p=>p.open=false);
   document.querySelectorAll(".setup-column input,.setup-column select,.setup-column button,.setup-column textarea").forEach(el=>el.disabled=locked);
-  $("start-run").disabled=locked||!config?.models.some(m=>m.enabled!==false)||parameterErrors.size>0||!!inputTokenError;
+  $("start-run").disabled=locked||!config?.models.some(m=>m.enabled!==false)||parameterErrors.size>0||(window.visualMedia?.active()? !window.visualMedia.ready():!!inputTokenError);
   $("start-run").textContent=busy?"正在提交…":"开始评测 →";
   $("remove-provider").disabled=locked||config?.providers.length<=1;
+  if(!locked)window.visualMedia?.updateOptions();
 }
 function changed(){updateCounts();syncButtons();saveWorkspace();}
 function updateCounts(){
   if(!config)return;
   const enabled=config.models.filter(m=>m.enabled!==false),profiles=enabled.reduce((n,m)=>n+m.profiles.length,0);
-  const groups=config.tasks.length*config.input_tokens.length*config.concurrencies.length*profiles;
+  const groups=(window.visualMedia?.active()?window.visualMedia.caseCount():config.tasks.length*config.input_tokens.length)*config.concurrencies.length*profiles;
   const sources=new Set(enabled.map(m=>m.provider_id)).size;
   statusBadge("selected-count",`${enabled.length} 个模型 · ${sources} 个来源`,enabled.length?"blue":"");
   $("selection-empty").hidden=enabled.length>0;
@@ -63,7 +64,7 @@ function connectionPayload(provider=activeProvider()){
 }
 function configPayload(){
   rebindModels();
-  return {config:structuredClone(config),connections:config.providers.map(p=>({id:p.id,api_key:providerKeys.get(p.id)||""})),mode:$("mode").value};
+  return {media:window.visualMedia?.selection(),config:structuredClone(config),connections:config.providers.map(p=>({id:p.id,api_key:providerKeys.get(p.id)||""})),mode:$("mode").value};
 }
 function rebindModels(){
   for(const model of config.models){const provider=config.providers.find(p=>p.id===model.provider_id);

@@ -1,13 +1,22 @@
 FROM python:3.12-slim AS runtime-base
 COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /usr/local/bin/uv
 ENV UV_PYTHON_DOWNLOADS=never UV_LINK_MODE=copy
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base AS visual-preprocess
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /app
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --locked --no-dev --group media --no-install-project --no-cache
+COPY visual_preprocess.py ./
+ENTRYPOINT ["/app/.venv/bin/python", "/app/visual_preprocess.py"]
 
 FROM runtime-base AS app
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 TIKTOKEN_CACHE_DIR=/app/.token-cache
 ENV PATH="/app/.venv/bin:$PATH"
 WORKDIR /app
 COPY pyproject.toml uv.lock .python-version ./
-RUN uv sync --locked --no-dev --no-install-project --no-cache
+RUN uv sync --locked --no-dev --group media --no-install-project --no-cache
 COPY . ./
 RUN python -c "import tiktoken; tiktoken.get_encoding('o200k_base')"
 EXPOSE 8001
