@@ -2,6 +2,9 @@ services:
   app:
     build: .
     restart: unless-stopped
+    env_file:
+      - path: ./state/oss.env
+        required: false
     ports:
       - "8001:8001"
     environment:
@@ -12,4 +15,4 @@ services:
     volumes:
       - ./results:/app/results
       - ./state:/app/state
-    stop_grace_period: 30s
+    stop_grace_period: 120s

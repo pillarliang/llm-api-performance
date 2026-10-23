@@ -328,7 +328,7 @@ function renderJobs(jobs){
     const head=node("div",undefined,"job-heading"),title=node("div"),actions=node("div",undefined,"actions");
     title.append(node("h3",`${job.name} · ${job.version}`),node("span",new Date(job.started_at).toLocaleString("zh-CN"),"muted"));
     const labels={starting:"准备中",running:"运行中",finished:p.failed?"已结束 · 有失败项":"已完成",cancelled:"已停止",error:"执行异常",interrupted:"已中断"};
-    actions.append(node("span",labels[job.status]||job.status,`badge ${live?"blue":job.status==="finished"&&!p.failed?"green":"amber"}`));
+    actions.append(node("span",job.storage_pending?"结果上传中":labels[job.status]||job.status,`badge ${live||job.storage_pending?"blue":job.status==="finished"&&!p.failed?"green":"amber"}`));
     if(live){
       const stop=node("button","停止任务","text-button danger");
       stop.addEventListener("click",()=>guarded(stop,async()=>{await api(`/api/jobs/${encodeURIComponent(job.job_id)}/stop`,{method:"POST"});await poll();}));actions.append(stop);
@@ -352,7 +352,7 @@ async function poll(){
     running=jobs.some(job=>["starting","running"].includes(job.status));
     $("connection-label").textContent="服务已连接";$("connection-dot").classList.add("ready");
     renderJobs(jobs);
-    const signature=jobs.map(job=>`${job.job_id}:${job.status}`).join("|");
+    const signature=jobs.map(job=>`${job.job_id}:${job.status}:${!!job.storage_pending}`).join("|");
     if(signature!==lastStatus){await refreshHistory();lastStatus=signature;}
     syncButtons();
   }catch(e){$("connection-label").textContent="连接中断";$("connection-dot").classList.remove("ready");error(e.message);}

@@ -6,14 +6,19 @@ export DASHSCOPE_BASE_URL="${DASHSCOPE_BASE_URL:-https://ws-ebzun9rcecl8l3rh.ap-
 mkdir -p results state
 project_dir="$PWD"
 worker_name="llm-performance-worker-1"
+storage_args=()
+if [[ -f state/oss.env ]]; then
+  storage_args=(--env-file "$project_dir/state/oss.env")
+fi
 docker run --rm -v "$project_dir:/workspace" -w /workspace \
   -e TIKTOKEN_CACHE_DIR=/workspace/.token-cache \
   python:3.12-slim python deploy/bootstrap.py
 if docker container inspect "$worker_name" >/dev/null 2>&1; then
-  docker stop --time 30 "$worker_name"
+  docker stop --time 120 "$worker_name"
   docker rm "$worker_name"
 fi
 docker run -d --name "$worker_name" --restart unless-stopped \
+  "${storage_args[@]}" \
   --read-only --cap-drop ALL --security-opt no-new-privileges:true --tmpfs /tmp \
   -p 8001:8001 \
   -v "$project_dir:/workspace:ro" \

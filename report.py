@@ -37,7 +37,21 @@ def main():
         config = load_config(args.config)
         output, _ = resolve_output(config, args.config.parent, args.output_root)
         source = output / "results.json"
-    print(build_report(source, args.output))
+    from storage import get_store, write_bytes
+    import os
+    root = Path(args.output_root or os.environ.get("RESULTS_ROOT", args.config.parent / "results")).resolve()
+    store = get_store(root)
+    if store.remote:
+        source = Path(source).resolve()
+        key = str(source.relative_to(root))
+        content = store.read(key)
+        if content is None:
+            raise FileNotFoundError("OSS 中不存在此结果")
+        write_bytes(source, content)
+    report = build_report(source, args.output)
+    if store.remote:
+        store.put(str(source.with_name("report.html").relative_to(root)), report.read_bytes())
+    print(report)
 
 
 if __name__ == "__main__":

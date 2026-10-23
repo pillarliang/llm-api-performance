@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import yaml
 
@@ -14,6 +14,7 @@ from benchmark import BenchmarkRun, atomic_json, now, plan, read_records, valida
 from catalog import CatalogError, ModelCatalog
 from connections import bind_providers, default_connection, normalize_base, resolve_connection
 from report import build_report
+from storage import get_store, StorageError, ARTIFACTS, encoded, valid_key, write_bytes
 
 ROOT = Path(__file__).resolve().parent
 RESULTS = Path(os.environ.get("RESULTS_ROOT", ROOT / "results")).resolve()
@@ -22,12 +23,23 @@ DEFAULT = ROOT / "config.focus.example.yaml"
 active_task = None
 active_state = None
 run_guard = asyncio.Lock()
+archive_guard = asyncio.Lock()
 run_registry = {}
 model_catalog = ModelCatalog(CONFIG.parent / "model-catalog.json")
 
 
 @asynccontextmanager
 async def lifespan(app):
+    store = get_store(RESULTS)
+    staged_jobs = set((RESULTS / ".jobs").glob("*.json"))
+    if store.remote:
+        # A failed final upload is retried before reading history from OSS.
+        await asyncio.to_thread(store.retry_pending)
+        for key in await asyncio.to_thread(store.keys, ".jobs/"):
+            if key.endswith(".json"):
+                local = store.path(key)
+                if not local.exists():
+                    write_bytes(local, await asyncio.to_thread(store.read, key))
     # Only public job metadata is persisted; API credentials remain in memory.
     for path in sorted((RESULTS / ".jobs").glob("*.json")):
         try:
@@ -36,6 +48,12 @@ async def lifespan(app):
             if not directory.is_relative_to(RESULTS):
                 continue
             if state["status"] in {"starting", "running"}:
+                if store.remote:
+                    for name in ARTIFACTS:
+                        if not (directory / name).exists():
+                            content = await asyncio.to_thread(store.read, state["path"] + "/" + name)
+                            if content is not None:
+                                write_bytes(directory / name, content)
                 state.update(status="interrupted", error="服务重启，任务已中断；可使用增量模式补跑。")
                 records = [r for r in read_records(directory / "requests.jsonl")
                            if r["session_id"] == state["session_id"] and r["phase"] == "measured"]
@@ -46,19 +64,59 @@ async def lifespan(app):
                 atomic_json(path, state)
                 # This service owns these jobs; a crashed previous worker may leave a lock.
                 (directory / ".run.lock").unlink(missing_ok=True)
-            state["has_results"] = (directory / "results.json").exists()
+            if store.remote and (state["status"] == "interrupted" or path in staged_jobs):
+                # Keep any newer local logs left by a crash and archive them.
+                if not directory.exists():
+                    directory.mkdir(parents=True)
+                for name in ARTIFACTS:
+                    if not (directory / name).exists():
+                        content = await asyncio.to_thread(store.read, state["path"] + "/" + name)
+                        if content is not None:
+                            write_bytes(directory / name, content)
+                state["has_results"] = (directory / "results.json").exists()
+                await asyncio.to_thread(store.archive, directory, state)
+            elif store.remote:
+                state["has_results"] = await asyncio.to_thread(store.read, state["path"] + "/results.json") is not None
+                path.unlink(missing_ok=True)
+            else:
+                state["has_results"] = (directory / "results.json").exists()
             run_registry[state["job_id"]] = dict(state=state, task=None, run=None)
         except (OSError, ValueError, KeyError, TypeError):
             continue
+    retry_task = asyncio.create_task(retry_archives()) if store.remote else None
     yield
     tasks = [entry["task"] for entry in run_registry.values() if entry["task"] and not entry["task"].done()]
-    for task in tasks:
-        task.cancel()
+    for entry in run_registry.values():
+        if entry["task"] and not entry["task"].done() and entry["state"]["status"] in {"starting", "running"}:
+            entry["task"].cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    if retry_task:
+        retry_task.cancel()
+        await asyncio.gather(retry_task, return_exceptions=True)
 
 
 app = FastAPI(title="Model Studio · LLM 性能评测", lifespan=lifespan, docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+
+@app.exception_handler(StorageError)
+async def storage_error(request, exc):
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+async def retry_archives():
+    while True:
+        await asyncio.sleep(15)
+        try:
+            async with archive_guard:
+                recovered = await asyncio.to_thread(get_store(RESULTS).retry_pending)
+                for state in recovered:
+                    entry = run_registry.get(state["job_id"])
+                    if entry:
+                        entry["state"].clear()
+                        entry["state"].update(state)
+        except StorageError:
+            pass  # The durable outbox remains available for the next retry.
 
 
 @app.get("/")
@@ -68,7 +126,7 @@ async def index():
 
 @app.get("/healthz")
 async def health():
-    return {"status": "ok", "service": "llm-performance"}
+    return {"status": "ok", "service": "llm-performance", "results_backend": os.environ.get("RESULTS_BACKEND", "local")}
 
 
 def default_base():
@@ -220,6 +278,23 @@ def persist_job(entry):
     atomic_json(RESULTS / ".jobs" / (entry["state"]["job_id"] + ".json"), job_snapshot(entry))
 
 
+async def archive_job(entry, output):
+    store = get_store(RESULTS)
+    if not store.remote:
+        return
+    async with archive_guard:
+        snapshot = job_snapshot(entry)
+        snapshot.pop("storage_pending", None)
+        entry["state"].update(storage_pending=True, has_results=False)
+        try:
+            await asyncio.to_thread(store.archive, output, snapshot)
+            entry["state"].clear()
+            entry["state"].update(snapshot)
+        except StorageError as exc:
+            entry["state"].update(storage_pending=True, has_results=False, error=str(exc))
+            persist_job(entry)
+
+
 async def execute(run, entry):
     state = entry["state"]
     state["status"] = "running"
@@ -243,6 +318,7 @@ async def execute(run, entry):
         state["finished_at"] = now()
         state.update(job_snapshot(entry))
         persist_job(entry)
+        await archive_job(entry, run.output)
         entry["run"] = None
 
 
@@ -272,6 +348,15 @@ async def start_run(request: Request):
                             input_tokens=config["input_tokens"], concurrencies=config["concurrencies"])
         entry = dict(state=active_state, task=None, run=run)
         persist_job(entry)
+        store = get_store(RESULTS)
+        if store.remote:
+            try:
+                await asyncio.to_thread(store.put, ".jobs/" + run.session_id + ".json", encoded(job_snapshot(entry)))
+            except StorageError:
+                credentials.clear()
+                run.credentials.clear()
+                (RESULTS / ".jobs" / (run.session_id + ".json")).unlink(missing_ok=True)
+                raise
         run_registry[run.session_id] = entry
         active_task = entry["task"] = asyncio.create_task(execute(run, entry))
     return job_snapshot(entry)
@@ -279,7 +364,7 @@ async def start_run(request: Request):
 
 async def stop_entry(entry):
     task = entry["task"]
-    if task and not task.done():
+    if task and not task.done() and entry["state"]["status"] in {"starting", "running"}:
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         if entry["state"]["status"] in {"starting", "running"}:
@@ -287,6 +372,8 @@ async def stop_entry(entry):
             if entry["run"] and entry["run"].credentials is not None:
                 entry["run"].credentials.clear()
             persist_job(entry)
+            if entry["run"]:
+                await archive_job(entry, entry["run"].output)
             entry["run"] = None
     return {"stopped": True}
 
@@ -319,11 +406,19 @@ async def status():
 
 @app.get("/api/runs")
 async def list_runs():
+    return await asyncio.to_thread(read_runs)
+
+
+def read_runs():
+    store = get_store(RESULTS)
     items = []
-    for path in sorted(RESULTS.glob("*/*/runs/*/results.json"), reverse=True):
+    for key in store.keys():
+        path = Path(key)
+        if len(path.parts) != 5 or path.parts[2] != "runs" or path.name != "results.json":
+            continue
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            items.append(dict(path=str(path.parent.relative_to(RESULTS)), name=data["settings"]["name"],
+            data = json.loads(store.read(key))
+            items.append(dict(path=str(path.parent), name=data["settings"]["name"],
                               version=data["settings"]["version"], run_id=path.parent.name,
                               started_at=data["started_at"], status=data["status"], totals=data["totals"], data_source=data["data_source"]))
         except (OSError, ValueError, KeyError):
@@ -333,6 +428,19 @@ async def list_runs():
 
 @app.get("/api/artifact/{artifact_path:path}")
 async def artifact(artifact_path: str):
+    try:
+        valid_key(artifact_path)
+    except ValueError:
+        raise HTTPException(404, "结果文件不存在")
+    if Path(artifact_path).name not in ARTIFACTS:
+        raise HTTPException(404, "结果文件不存在")
+    store = get_store(RESULTS)
+    if store.remote:
+        data = await asyncio.to_thread(store.read, artifact_path)
+        if data is None:
+            raise HTTPException(404, "结果文件不存在")
+        media_type = {"results.json": "application/json", "report.html": "text/html"}.get(Path(artifact_path).name, "application/x-ndjson")
+        return Response(data, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{Path(artifact_path).name}"'})
     path = (RESULTS / artifact_path).resolve()
     if not path.is_relative_to(RESULTS) or path.name not in {"results.json", "report.html", "requests.jsonl", "events.jsonl"} or not path.is_file():
         raise HTTPException(404, "结果文件不存在")

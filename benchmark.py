@@ -24,11 +24,13 @@ import yaml
 from metrics import measure, summarize, totals
 from tokens import TOKENIZER, count, make_prompt
 from connections import normalize_providers
+from storage import get_store, restore_latest, encoded, StorageError
 
 CONFIG_PATH = Path(__file__).with_name("config.example.yaml")
 UPDATE_MODE = "incremental"
 EXECUTE = False
 OUTPUT_ROOT = None
+CHECKPOINT_SECONDS = 5
 RESERVED = {"model", "messages", "stream", "stream_options", "n"}
 
 
@@ -177,7 +179,11 @@ def atomic_json(path, data):
 def resolve_output(config, config_dir, output_root=None, mode="incremental"):
     if mode not in {"full", "incremental"}:
         raise ValueError("update mode 必须为 full 或 incremental")
-    version_dir = (Path(output_root) if output_root else Path(config_dir) / "results") / config["name"] / config["version"]
+    root = (Path(output_root) if output_root else Path(os.environ.get("RESULTS_ROOT", Path(config_dir) / "results"))).resolve()
+    store = get_store(root)
+    if store.remote and mode == "incremental":
+        restore_latest(store, config["name"], config["version"])
+    version_dir = root / config["name"] / config["version"]
     latest = version_dir / "latest.json"
     if mode == "incremental" and latest.exists():
         run_id = safe_name(json.loads(latest.read_text())["run_id"])
@@ -404,6 +410,21 @@ class BenchmarkRun:
 
     async def run(self):
         self.output.mkdir(parents=True, exist_ok=True)
+        store = get_store(self.output.resolve().parents[3])
+        checkpoint_task = None
+        checkpoint_stop = asyncio.Event()
+
+        async def checkpoints():
+            while not checkpoint_stop.is_set():
+                try:
+                    await asyncio.wait_for(checkpoint_stop.wait(), timeout=CHECKPOINT_SECONDS)
+                except TimeoutError:
+                    self.write_summary()
+                    snapshot = store.snapshot(self.output)
+                    try:
+                        await asyncio.to_thread(store.upload, snapshot)
+                    except StorageError:
+                        print("OSS 检查点上传失败，将继续重试；本地工作文件已保留", flush=True)
         lock = self.output / ".run.lock"
         try:
             with lock.open("x") as file:
@@ -422,16 +443,24 @@ class BenchmarkRun:
                     buckets[model["id"]].append(entry)
             self.skipped = len(self.prepared) * self.config["repetitions"] - sum(map(len, jobs.values()))
             atomic_json(self.output.parent.parent / "latest.json", {"run_id": self.output.name})
+            if store.remote:
+                await asyncio.to_thread(store.put, str((self.output.parent.parent / "latest.json").relative_to(store.root)), encoded({"run_id": self.output.name}))
             with (self.output / "events.jsonl").open("a", encoding="utf-8") as events, (self.output / "requests.jsonl").open("a", encoding="utf-8") as records:
                 self.events_file, self.records_file = events, records
+                if store.remote:
+                    checkpoint_task = asyncio.create_task(checkpoints())
                 try:
                     async with asyncio.TaskGroup() as models:
                         for entries in buckets.values():
                             models.create_task(self.run_model(entries, jobs))
                 finally:
+                    checkpoint_stop.set()
+                    if checkpoint_task:
+                        await checkpoint_task
                     self.write_summary()
         finally:
-            lock.unlink(missing_ok=True)
+            if not store.remote:
+                lock.unlink(missing_ok=True)
         return self.output
 
 
@@ -457,7 +486,14 @@ def main():
     description, prepared, output = plan(config, args.config.parent, args.output_root, args.mode)
     print(json.dumps(dict(description, execute=args.execute), ensure_ascii=False, indent=2))
     if args.execute:
-        asyncio.run(BenchmarkRun(config, args.config.parent, output, prepared).run())
+        try:
+            asyncio.run(BenchmarkRun(config, args.config.parent, output, prepared).run())
+        finally:
+            store = get_store(output.resolve().parents[3])
+            if store.remote and (output / "results.json").exists():
+                from report import build_report
+                build_report(output / "results.json")
+                store.archive(output)
 
 
 if __name__ == "__main__":

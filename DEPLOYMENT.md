@@ -1,5 +1,36 @@
 # 运行与部署
 
+## OSS 存储配置
+
+线上私有桶：`llm-performance-eval`，地域 `cn-beijing`，前缀 `results/`。仅复用 paragraph-player 的 OSS 账号，新桶与原应用数据隔离。凭证配置存放在 `state/oss.env`（Git 忽略，权限 `0600`）：
+
+```dotenv
+RESULTS_BACKEND=oss
+OSS_BUCKET=llm-performance-eval
+OSS_REGION=cn-beijing
+OSS_ENDPOINT=https://oss-cn-beijing.aliyuncs.com
+OSS_PREFIX=results
+OSS_ACCESS_KEY_ID=填写服务端凭证
+OSS_ACCESS_KEY_SECRET=填写服务端凭证
+```
+
+可按需增加 `OSS_SESSION_TOKEN`。部署脚本、worker、Compose 和 systemd 模板均加载此配置。未配置 `RESULTS_BACKEND` 的开发环境默认使用本地存储；未知后端或 OSS 配置错误直接报错。需要的运行权限为新桶的 ListObjects、GetObject、PutObject；`deploy/provision_oss.py` 另外需要 CreateBucket 和 DeleteObject 以创建私有桶并清理读写探针。
+
+结果列表和下载从 OSS 获取，增量运行先下载最新指针和请求记录。执行过程中每 5 秒尝试上传日志和汇总检查点；结束时上传 JSON、JSONL 和 HTML，再提交最终任务元数据，成功后清理该运行的本地文件。失败时保留 `results/.pending/` 与工作文件，页面显示上传状态；服务每 15 秒重试，也会在启动时重试。不要手工清理待上传目录。OSS 故障不会回退到本地结果。运行中的进度仍来自单进程内存，重启从 OSS 记录和未上传工作文件恢复。多个服务器/worker 同时写同一结果前缀不受支持。
+
+CLI 与独立 `uvicorn` 进程需要显式加载相同环境变量，例如启动前执行 `set -a; source state/oss.env; set +a`。CLI 结束时上传报告并清理工作文件；`report.py` 在 OSS 模式从云端读取结果，生成本地导出文件并回存云端报告。CLI 上传失败可通过启动服务重试同一 `RESULTS_ROOT` 的待上传队列。
+
+验证命令（使用真实 OSS、模拟模型调用，不消耗模型请求；自动清理专用验证前缀）：
+
+```bash
+docker run --rm --env-file "$PWD/state/oss.env" \
+  -v "$PWD:/workspace:ro" -w /workspace \
+  -e TIKTOKEN_CACHE_DIR=/workspace/.token-cache -e PYTHONDONTWRITEBYTECODE=1 \
+  python:3.12-slim .runtime/bin/python deploy/verify_oss.py
+```
+
+本次验证覆盖上传/读取、清理本地后下载、全新本地目录启动后恢复任务，以及增量跳过已有成功项。之前的本地测试运行和任务记录已清空。
+
 本仓库直接在根目录实现 README 描述的 `performance-v2`。Web 工作台沿用 Model Studio 简洁布局，保留白灰色调，使用卡片底色区分区域，并保留 1px 浅灰外框。服务端口固定为 **8001**，只启动 **1 个 Uvicorn worker**，由同一任务管理器调度多个独立后台评测，并协调同一运行目录的写锁。
 
 ## Docker 部署
@@ -35,7 +66,7 @@ docker stop --time 30 llm-performance-worker-1   # 停止并保存已开始请�
 
 网页默认新建独立运行，提交后可继续配置并启动其他任务。`GET /api/jobs` 返回各任务进度，`POST /api/jobs/{job_id}/stop` 单独停止任务；旧 `/api/status`、`/api/stop` 只对应最近启动的一项。进度按完成的评测项计数，重试次数另列。
 
-任务状态保存在 `results/.jobs/`，不保存自定义 Key。刷新或关闭页面不影响运行；服务关闭时取消全部任务并保存结果，重启保留任务记录。异常退出后的未完成任务标记为中断，可用增量模式补跑。部署前检查 `/api/jobs` 没有 `starting` / `running` 任务，避免中断用户评测。
+线上任务状态保存在 OSS 的 `results/.jobs/`，本地暂存待上传元数据，不保存自定义 Key。刷新或关闭页面不影响运行；服务关闭时取消执行中的任务并等待结果上传，重启从 OSS 恢复任务记录。异常退出后的未完成任务标记为中断，可用增量模式补跑。部署前检查 `/api/jobs` 没有 `starting` / `running` 或 `storage_pending` 任务，避免中断用户评测。
 
 `max_retries` 取 0–5，网页默认 2，CLI 未配置时保持 0。429、408、5xx、超时及网络中断按 1、2、4、8、16 秒退避重试，鉴权/参数错误不重试。每次尝试独立保存，成功请求的性能指标不包含退避等待。
 
