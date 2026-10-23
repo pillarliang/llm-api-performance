@@ -26,7 +26,7 @@ CLI 与独立 `uvicorn` 进程需要显式加载相同环境变量，例如启�
 docker run --rm --env-file "$PWD/state/oss.env" \
   -v "$PWD:/workspace:ro" -w /workspace \
   -e TIKTOKEN_CACHE_DIR=/workspace/.token-cache -e PYTHONDONTWRITEBYTECODE=1 \
-  python:3.12-slim .runtime/bin/python deploy/verify_oss.py
+  llm-performance-runtime:local .runtime/bin/python deploy/verify_oss.py
 ```
 
 本次验证覆盖上传/读取、清理本地后下载、全新本地目录启动后恢复任务，以及增量跳过已有成功项。之前的本地测试运行和任务记录已清空。
@@ -35,7 +35,7 @@ docker run --rm --env-file "$PWD/state/oss.env" \
 
 ## Docker 部署
 
-需要宿主机可访问 Docker，以及构建时可下载 Python 依赖和 `o200k_base` 编码表。
+需要宿主机可访问 Docker，以及构建时可拉取 Python、uv 镜像，下载 Python 依赖和 `o200k_base` 编码表。宿主机无需安装 uv。
 
 ```bash
 cd /home/pillar/llm-performance
@@ -44,7 +44,7 @@ export DASHSCOPE_BASE_URL='https://ws-ebzun9rcecl8l3rh.ap-southeast-1.maas.aliyu
 bash deploy/start.sh
 ```
 
-脚本在标准 `python:3.12-slim` 容器中按照 `requirements.lock` 准备 `.runtime`，然后启动 `llm-performance-worker-1`，轮询 `http://127.0.0.1:8001/healthz`，通过后输出访问地址。远程访问使用 `http://服务器地址:8001`。重复执行会先平滑停止旧 worker，再以原有结果目录重建。容器使用 `unless-stopped` 自动重启策略，运行一个 Uvicorn worker；源码挂载为只读，`results/` 和 `state/` 可写。
+脚本先构建 Dockerfile 的 `runtime-base` 阶段，得到包含 Python 3.12 和固定版本 uv 的 `llm-performance-runtime:local` 镜像。在该镜像中执行 `uv sync --locked --no-dev --no-install-project`，按 `uv.lock` 同步 `.runtime`，检查依赖兼容性并预热编码表；下载缓存保存在 Git 忽略的 `.bootstrap/uv-cache`。然后启动 `llm-performance-worker-1`，轮询 `http://127.0.0.1:8001/healthz`，通过后输出访问地址。远程访问使用 `http://服务器地址:8001`。重复执行会先平滑停止旧 worker，再以原有结果目录重建。容器使用 `unless-stopped` 自动重启策略，运行一个 Uvicorn worker；源码挂载为只读，`results/` 和 `state/` 可写。
 
 工作台无需登录口令，直接访问页面即可使用。默认 SG 密钥从环境变量传入，不下发浏览器。网页也支持填写自定义 Key 和 Base URL；自定义 Key 自动保存在当前浏览器 localStorage，按来源与 API 地址绑定，刷新后恢复，不写入服务器共享配置或评测结果。不同浏览器互不共享；同一浏览器配置共用时仍可读取，可用「清除本机 Key」移除。
 
@@ -88,7 +88,9 @@ export DASHSCOPE_API_KEY='你的 API Key'
 uv run uvicorn server:app --host 0.0.0.0 --port 8001 --workers 1
 ```
 
-已生成 `uv.lock`，以及从锁文件导出的 `requirements.lock`。Python 本地环境使用 `uv sync --locked`；Docker 构建和 worker 准备脚本安装 `requirements.lock` 中固定的版本。更新依赖时先运行 `uv lock`，再运行 `uv export --locked --no-dev --no-hashes --no-emit-project --format requirements-txt --output-file requirements.lock`。
+只维护 `pyproject.toml` 和 `uv.lock`，无需导出 requirements 文件。本地开发使用 `uv sync --locked`；Docker 构建和 worker 准备脚本使用 `uv sync --locked --no-dev --no-install-project`，分别同步到镜像中的 `.venv` 和宿主机挂载的 `.runtime`。容器使用自带 Python，禁止额外下载解释器；服务启动直接使用已准备好的环境，不再同步依赖。锁文件与项目声明不一致时部署会报错。
+
+添加或删除依赖使用 `uv add 包名` / `uv remove 包名`；手动修改 `pyproject.toml` 后运行 `uv lock`，需要主动升级所有依赖时运行 `uv lock --upgrade`。随后运行 `uv sync --locked` 和测试，一起提交 `pyproject.toml` 与 `uv.lock`，重新部署即可。uv 的容器版本统一固定在 Dockerfile 的 `runtime-base` 阶段。
 
 如果使用 systemd，将环境变量以 `NAME=value`（不加 `export`）保存在项目 `.env`，权限设为 `0600`。环境文件需要 `DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`。按实际运行账号审查并安装 [服务模板](deploy/llm-performance.service)，随后启用服务。模板使用此仓库路径及 `.venv/bin/uvicorn`。
 

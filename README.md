@@ -154,7 +154,7 @@ flowchart TB
 | 原生 HTML / CSS / JavaScript | 渲染离线报告，无前端构建步骤或外部脚本依赖 |
 | `unittest`、`httpx.MockTransport` | 模拟流响应并验证 SDK 解析与执行管线 |
 
-依赖范围由 `pyproject.toml` 声明，依赖已锁定于 `uv.lock`；Docker 使用从同一锁文件导出的 `requirements.lock`。每次执行还会记录实际使用的 Python、操作系统、OpenAI SDK 与 tiktoken 版本。
+依赖范围由 `pyproject.toml` 声明，依赖已锁定于 `uv.lock`；本地开发、Docker 构建和 worker 部署统一通过 `uv sync --locked` 安装，部署时加上 `--no-dev --no-install-project`，只安装运行依赖。每次执行还会记录实际使用的 Python、操作系统、OpenAI SDK 与 tiktoken 版本。
 
 ### 2.3 目录与职责
 

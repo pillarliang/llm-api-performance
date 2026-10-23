@@ -6,13 +6,15 @@ export DASHSCOPE_BASE_URL="${DASHSCOPE_BASE_URL:-https://ws-ebzun9rcecl8l3rh.ap-
 mkdir -p results state
 project_dir="$PWD"
 worker_name="llm-performance-worker-1"
+runtime_image="llm-performance-runtime:local"
 storage_args=()
 if [[ -f state/oss.env ]]; then
   storage_args=(--env-file "$project_dir/state/oss.env")
 fi
+docker build --target runtime-base -t "$runtime_image" .
 docker run --rm -v "$project_dir:/workspace" -w /workspace \
   -e TIKTOKEN_CACHE_DIR=/workspace/.token-cache \
-  python:3.12-slim python deploy/bootstrap.py
+  "$runtime_image" python deploy/bootstrap.py
 if docker container inspect "$worker_name" >/dev/null 2>&1; then
   docker stop --time 120 "$worker_name"
   docker rm "$worker_name"
@@ -26,7 +28,7 @@ docker run -d --name "$worker_name" --restart unless-stopped \
   -v "$project_dir/state:/workspace/state" \
   -w /workspace -e DASHSCOPE_API_KEY -e DASHSCOPE_BASE_URL \
   -e PYTHONUNBUFFERED=1 -e PYTHONDONTWRITEBYTECODE=1 \
-  python:3.12-slim .runtime/bin/python deploy/worker.py
+  "$runtime_image" .runtime/bin/python deploy/worker.py
 python3 - <<'PY'
 import time
 import urllib.request
